@@ -9,6 +9,7 @@ import adminDebug from "./routes/adminDebug.js";
 import aiQuery from "./routes/aiQuery.js";
 import PostPlacementRoutes from "./routes/postPlacement.js";
 import postPlacementDataRoutes from "./routes/postPlacement.routes.js";
+import hrRoutes from "./routes/hr.js";
 
 const app = express();
 
@@ -28,6 +29,7 @@ app.use("/api", adminDebug);
 app.use("/api", aiQuery);
 app.use("/api/offers", PostPlacementRoutes);
 app.use("/api/post-placement", postPlacementDataRoutes);
+app.use("/api/hr", hrRoutes);
 
 connectDB();
 

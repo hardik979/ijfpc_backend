@@ -70,6 +70,9 @@ PostPlacementOfferSchema.index({
   companyName: 1,
   offerDate: -1,
 });
+// speed lookups & grouping
+PostPlacementOfferSchema.index({ "hr.email": 1 });
+PostPlacementOfferSchema.index({ "hr.contactNumber": 1 });
 
 export default mongoose.models.PostPlacementOffer ||
   mongoose.model("PostPlacementOffer", PostPlacementOfferSchema);
