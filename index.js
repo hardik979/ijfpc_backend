@@ -10,13 +10,14 @@ import aiQuery from "./routes/aiQuery.js";
 import PostPlacementRoutes from "./routes/postPlacement.js";
 import postPlacementDataRoutes from "./routes/postPlacement.routes.js";
 import hrRoutes from "./routes/hr.js";
-
+import cloudinaryRoutes from "./routes/cloudinary.routes.js";
+import EnrollmentRequest from "./routes/enrollments.js";
 const app = express();
 
 //Middleware
 app.use(
   cors({
-    origin: ["https://dashboard.itjobsfactory.com"],
+    origin: "https://dashboard.itjobsfactory.com",
     credentials: true,
   })
 );
@@ -30,7 +31,8 @@ app.use("/api", aiQuery);
 app.use("/api/offers", PostPlacementRoutes);
 app.use("/api/post-placement", postPlacementDataRoutes);
 app.use("/api/hr", hrRoutes);
-
+app.use("/api/cloudinary", cloudinaryRoutes);
+app.use("/api/enrollments", EnrollmentRequest);
 connectDB();
 
 const PORT = process.env.PORT || 8000;
