@@ -6,28 +6,43 @@ const PaymentSchema = new mongoose.Schema(
     amount: { type: Number, required: true, min: 0 },
     date: { type: Date },
     mode: { type: String, trim: true },
-    receiptNos: { type: [String], default: [] }, // handles "14, 15"
-    note: { type: String, trim: true }, // row-level remarks
-    raw: { type: mongoose.Schema.Types.Mixed }, // snapshot of original row
+    receiptNos: { type: [String], default: [] },
+    note: { type: String, trim: true },
+    raw: { type: mongoose.Schema.Types.Mixed },
+  },
+  { _id: false }
+);
+
+// NEW: refunds you issued to the student
+const RefundSchema = new mongoose.Schema(
+  {
+    amount: { type: Number, required: true, min: 0 },
+    date: { type: Date },
+    mode: { type: String, trim: true },
+    note: { type: String, trim: true },
   },
   { _id: false }
 );
 
 const PrePlacementStudentSchema = new mongoose.Schema(
   {
-    // Store original name but enforce uniqueness on a normalized key
     name: { type: String, required: true, trim: true, index: true },
-    nameKey: { type: String, required: true, unique: true, index: true }, // lowercased, trimmed, single spaces
+    nameKey: { type: String, required: true, unique: true, index: true },
 
     courseName: { type: String, trim: true },
-    terms: { type: String, trim: true }, // from column "S" (e.g., "29k+30%")
+    terms: { type: String, trim: true },
     totalFee: { type: Number, required: true, min: 0 },
     dueDate: { type: Date },
 
     payments: { type: [PaymentSchema], default: [] },
 
-    totalReceived: { type: Number, default: 0 },
-    remainingFee: { type: Number, default: 0 },
+    // NEW: refunds and rollups
+    refunds: { type: [RefundSchema], default: [] },
+    totalRefunded: { type: Number, default: 0 }, // sum(refunds.amount)
+    netCollected: { type: Number, default: 0 }, // totalReceived - totalRefunded
+
+    totalReceived: { type: Number, default: 0 }, // sum(payments.amount) (gross in)
+    remainingFee: { type: Number, default: 0 }, // totalFee - netCollected
 
     status: {
       type: String,
@@ -35,6 +50,10 @@ const PrePlacementStudentSchema = new mongoose.Schema(
       default: "ACTIVE",
       index: true,
     },
+
+    // (optional) meta about dropping – handy if you want to store when/why
+    droppedAt: { type: Date },
+    dropReason: { type: String, trim: true },
 
     source: {
       provider: { type: String, default: "SheetDB" },
@@ -45,11 +64,29 @@ const PrePlacementStudentSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Helper if you ever save() docs (note: updateOne bypasses this)
+// Recalculate rollups before save
 PrePlacementStudentSchema.pre("save", function (next) {
-  const sum = (this.payments || []).reduce((s, p) => s + (p.amount || 0), 0);
-  this.totalReceived = sum;
-  this.remainingFee = Math.max((this.totalFee || 0) - sum, 0);
+  const sum = (arr = []) =>
+    (arr || []).reduce((s, x) => s + (Number(x?.amount) || 0), 0);
+
+  const grossIn = sum(this.payments); // what they paid
+  const refunded = sum(this.refunds); // what you returned
+  const net = Math.max(grossIn - refunded, 0); // don't go negative
+
+  this.totalReceived = grossIn;
+  this.totalRefunded = refunded;
+  this.netCollected = net;
+  this.remainingFee = Math.max((this.totalFee || 0) - net, 0);
+
+  // convenience: set droppedAt if newly marked DROPPED and missing
+  if (
+    this.isModified("status") &&
+    this.status === "DROPPED" &&
+    !this.droppedAt
+  ) {
+    this.droppedAt = new Date();
+  }
+
   next();
 });
 

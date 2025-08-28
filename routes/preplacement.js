@@ -1,3 +1,4 @@
+// routes/preplacementRoutes.js
 import express from "express";
 import mongoose from "mongoose";
 import PrePlacementStudent, {
@@ -6,9 +7,9 @@ import PrePlacementStudent, {
 
 const router = express.Router();
 
-// -------- Util: date range parsing (supports month=YYYY-MM or from/to ISO) ----------
+/* ───────────────────────── utils ───────────────────────── */
+
 function getDateRange(q) {
-  // month=2024-10 => [2024-10-01T00:00Z, 2024-11-01T00:00Z)
   if (q.month) {
     const [y, m] = String(q.month).split("-").map(Number);
     if (!y || !m) return {};
@@ -20,14 +21,49 @@ function getDateRange(q) {
   const to = q.to ? new Date(q.to) : undefined;
   return { from, to };
 }
-
 function hasRange({ from, to }) {
   return from instanceof Date || to instanceof Date;
 }
+function toNumber(v) {
+  if (v == null) return 0;
+  const n = Number(String(v).replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+function parseDateAuto(v) {
+  if (!v) return null;
+  if (v instanceof Date) return v;
+  const s = String(v).trim();
+  if (!s) return null;
+  if (/^\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}$/.test(s)) {
+    const [d, m, yRaw] = s.split(/[\/.-]/).map((x) => x.trim());
+    let y = parseInt(yRaw, 10);
+    if (yRaw.length === 2) y = 2000 + y;
+    const dt = new Date(Date.UTC(y, parseInt(m, 10) - 1, parseInt(d, 10)));
+    return isNaN(dt) ? null : dt;
+  }
+  const dt = new Date(s);
+  return isNaN(dt) ? null : dt;
+}
+function normalizeName(name) {
+  return (name || "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+function recalcTotals(doc) {
+  const paid = (doc.payments || []).reduce((a, p) => a + toNumber(p.amount), 0);
+  const refunded = (doc.refunds || []).reduce(
+    (a, r) => a + toNumber(r.amount),
+    0
+  );
+  const net = Math.max(paid - refunded, 0);
+  doc.totalReceived = paid; // gross in
+  doc.totalRefunded = refunded; // out
+  doc.netCollected = net; // in - out
+  doc.remainingFee = Math.max(toNumber(doc.totalFee) - net, 0);
+}
 
-// -------- GET /api/preplacement/summary -------------------------------------------
-// Totals: totalStudents, totalFee, totalReceived, remainingFee
-// Also: collectedInRange (if month/from/to passed), monthly breakdown (within range)
+/* ───────────────────────── SUMMARY ─────────────────────────
+Totals and monthly net collections (payments - refunds)
+Query: ?status=&course=&month=YYYY-MM OR from=&to= (ISO)
+*/
 router.get("/summary", async (req, res) => {
   try {
     const { status, course } = req.query;
@@ -39,7 +75,7 @@ router.get("/summary", async (req, res) => {
 
     const dateMatch = hasRange({ from, to })
       ? {
-          "payments.date": {
+          "txns.date": {
             ...(from ? { $gte: from } : {}),
             ...(to ? { $lt: to } : {}),
           },
@@ -48,6 +84,47 @@ router.get("/summary", async (req, res) => {
 
     const pipeline = [
       { $match: match },
+      // Build a combined "txns" array with payments (+) and refunds (-)
+      {
+        $project: {
+          totalFee: 1,
+          totalReceived: 1,
+          totalRefunded: { $ifNull: ["$totalRefunded", 0] },
+          netCollected: {
+            $ifNull: [
+              "$netCollected",
+              {
+                $subtract: [
+                  "$totalReceived",
+                  { $ifNull: ["$totalRefunded", 0] },
+                ],
+              },
+            ],
+          },
+          remainingFee: 1,
+          txns: {
+            $concatArrays: [
+              {
+                $map: {
+                  input: { $ifNull: ["$payments", []] },
+                  as: "p",
+                  in: { date: "$$p.date", amount: "$$p.amount" }, // +
+                },
+              },
+              {
+                $map: {
+                  input: { $ifNull: ["$refunds", []] },
+                  as: "r",
+                  in: {
+                    date: "$$r.date",
+                    amount: { $multiply: ["$$r.amount", -1] },
+                  }, // -
+                },
+              },
+            ],
+          },
+        },
+      },
       {
         $facet: {
           overall: [
@@ -56,30 +133,29 @@ router.get("/summary", async (req, res) => {
                 _id: null,
                 totalStudents: { $sum: 1 },
                 totalFee: { $sum: "$totalFee" },
-                totalReceived: { $sum: "$totalReceived" },
+                totalReceived: { $sum: "$totalReceived" }, // gross
+                totalRefunded: { $sum: "$totalRefunded" },
+                netCollected: { $sum: "$netCollected" },
                 remainingFee: { $sum: "$remainingFee" },
               },
             },
           ],
           collectedInRange: [
-            {
-              $unwind: { path: "$payments", preserveNullAndEmptyArrays: false },
-            },
+            { $unwind: { path: "$txns", preserveNullAndEmptyArrays: false } },
             ...(dateMatch ? [{ $match: dateMatch }] : []),
-            { $group: { _id: null, collected: { $sum: "$payments.amount" } } },
+            { $group: { _id: null, collected: { $sum: "$txns.amount" } } }, // NET in range
           ],
           byMonth: [
-            {
-              $unwind: { path: "$payments", preserveNullAndEmptyArrays: false },
-            },
+            { $unwind: { path: "$txns", preserveNullAndEmptyArrays: false } },
             ...(dateMatch ? [{ $match: dateMatch }] : []),
+            { $match: { "txns.date": { $type: "date" } } },
             {
               $group: {
                 _id: {
-                  y: { $year: "$payments.date" },
-                  m: { $month: "$payments.date" },
+                  y: { $year: "$txns.date" },
+                  m: { $month: "$txns.date" },
                 },
-                collected: { $sum: "$payments.amount" },
+                collected: { $sum: "$txns.amount" }, // NET per month
               },
             },
             { $sort: { "_id.y": 1, "_id.m": 1 } },
@@ -90,11 +166,13 @@ router.get("/summary", async (req, res) => {
         $project: {
           totalStudents: { $ifNull: [{ $first: "$overall.totalStudents" }, 0] },
           totalFee: { $ifNull: [{ $first: "$overall.totalFee" }, 0] },
-          totalReceived: { $ifNull: [{ $first: "$overall.totalReceived" }, 0] },
+          totalReceived: { $ifNull: [{ $first: "$overall.totalReceived" }, 0] }, // gross
+          totalRefunded: { $ifNull: [{ $first: "$overall.totalRefunded" }, 0] },
+          netCollected: { $ifNull: [{ $first: "$overall.netCollected" }, 0] },
           remainingFee: { $ifNull: [{ $first: "$overall.remainingFee" }, 0] },
           collectedInRange: {
             $ifNull: [{ $first: "$collectedInRange.collected" }, 0],
-          },
+          }, // NET in range
           monthly: "$byMonth",
         },
       },
@@ -112,10 +190,11 @@ router.get("/summary", async (req, res) => {
   }
 });
 
-// -------- GET /api/preplacement/students ------------------------------------------
-// Paginated list with optional search/status/course filters.
-// Supports month/from/to to compute per-student paymentsInRange + collectedInRange.
-// Query: ?page=1&limit=20&search=akshay&status=ACTIVE&course=Premium&month=2024-10
+/* ───────────────────────── LIST ─────────────────────────
+Paginated list + optional month/from/to
+?includePayments=true&includeRefunds=true to include arrays
+If range passed, collectedInRange is NET (payments - refunds)
+*/
 router.get("/students", async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
@@ -129,6 +208,8 @@ router.get("/students", async (req, res) => {
     const { from, to } = getDateRange(req.query);
     const includePayments =
       String(req.query.includePayments || "false") === "true";
+    const includeRefunds =
+      String(req.query.includeRefunds || "false") === "true";
 
     const match = {};
     if (status && PREPLACEMENT_STATUSES.includes(status)) match.status = status;
@@ -138,7 +219,6 @@ router.get("/students", async (req, res) => {
       match.$or = [{ name: rx }, { courseName: rx }];
     }
 
-    // We compute paymentsInRange and collectedInRange only if a range was supplied
     const setRangeFields = hasRange({ from, to })
       ? [
           {
@@ -155,18 +235,43 @@ router.get("/students", async (req, res) => {
                   },
                 },
               },
+              refundsInRange: {
+                $filter: {
+                  input: { $ifNull: ["$refunds", []] },
+                  as: "r",
+                  cond: {
+                    $and: [
+                      ...(from ? [{ $gte: ["$$r.date", from] }] : []),
+                      ...(to ? [{ $lt: ["$$r.date", to] }] : []),
+                    ],
+                  },
+                },
+              },
             },
           },
           {
             $addFields: {
               collectedInRange: {
-                $sum: {
-                  $map: {
-                    input: "$paymentsInRange",
-                    as: "pi",
-                    in: "$$pi.amount",
+                $subtract: [
+                  {
+                    $sum: {
+                      $map: {
+                        input: "$paymentsInRange",
+                        as: "pi",
+                        in: "$$pi.amount",
+                      },
+                    },
                   },
-                },
+                  {
+                    $sum: {
+                      $map: {
+                        input: "$refundsInRange",
+                        as: "ri",
+                        in: "$$ri.amount",
+                      },
+                    },
+                  },
+                ],
               },
             },
           },
@@ -188,7 +293,9 @@ router.get("/students", async (req, res) => {
                 courseName: 1,
                 terms: 1,
                 totalFee: 1,
-                totalReceived: 1,
+                totalReceived: 1, // gross
+                totalRefunded: 1,
+                netCollected: 1, // NEW net
                 remainingFee: 1,
                 status: 1,
                 dueDate: 1,
@@ -197,11 +304,13 @@ router.get("/students", async (req, res) => {
                 paymentsCount: { $size: "$payments" },
                 ...(hasRange({ from, to })
                   ? {
-                      collectedInRange: 1,
-                      paymentsInRange: includePayments ? 1 : 0,
+                      collectedInRange: 1, // NET in range
+                      ...(includePayments ? { paymentsInRange: 1 } : {}),
+                      ...(includeRefunds ? { refundsInRange: 1 } : {}),
                     }
                   : {}),
                 ...(includePayments ? { payments: 1 } : {}),
+                ...(includeRefunds ? { refunds: 1 } : {}),
               },
             },
           ],
@@ -229,9 +338,86 @@ router.get("/students", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// CREATE a new pre-placement student
+router.post("/students", async (req, res) => {
+  try {
+    const b = req.body || {};
 
-// -------- GET /api/preplacement/students/:id --------------------------------------
-// Full detail for one student. Supports month/from/to to filter payments shown.
+    // basic validation
+    const name = (b.name || "").trim();
+    if (!name) return res.status(400).json({ error: "Name is required" });
+    if (b.status && !PREPLACEMENT_STATUSES.includes(b.status)) {
+      return res.status(400).json({ error: "Invalid status" });
+    }
+
+    // shape arrays from payload (both optional)
+    const payments = Array.isArray(b.payments)
+      ? b.payments.map((p) => ({
+          amount: toNumber(p.amount),
+          date: parseDateAuto(p.date),
+          mode: (p.mode || "").trim(),
+          receiptNos: Array.isArray(p.receiptNos)
+            ? p.receiptNos.map((x) => String(x).trim()).filter(Boolean)
+            : String(p.receiptNos || "")
+                .split(",")
+                .map((x) => x.trim())
+                .filter(Boolean),
+          note: (p.note || "").trim(),
+          raw: p.raw || undefined,
+        }))
+      : [];
+
+    const refunds = Array.isArray(b.refunds)
+      ? b.refunds.map((r) => ({
+          amount: toNumber(r.amount),
+          date: parseDateAuto(r.date),
+          mode: (r.mode || "").trim(),
+          note: (r.note || "").trim(),
+        }))
+      : [];
+
+    // assemble doc
+    const doc = new PrePlacementStudent({
+      name,
+      nameKey: normalizeName(name),
+      courseName: (b.courseName || "").trim(),
+      terms: (b.terms || "").trim(),
+      totalFee: toNumber(b.totalFee),
+      dueDate: parseDateAuto(b.dueDate),
+      status: b.status || "ACTIVE",
+      payments,
+      refunds,
+      // allow initializing as dropped
+      ...(b.status === "DROPPED"
+        ? {
+            droppedAt: b.droppedAt
+              ? parseDateAuto(b.droppedAt) || new Date()
+              : new Date(),
+            dropReason: (b.dropReason || "").trim() || undefined,
+          }
+        : {}),
+    });
+
+    // rollups
+    recalcTotals(doc);
+
+    await doc.save();
+    return res.status(201).json(doc);
+  } catch (err) {
+    if (err?.code === 11000) {
+      // unique index on nameKey
+      return res
+        .status(409)
+        .json({ error: "Another student already uses that name" });
+    }
+    console.error("create student error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/* ───────────────────────── DETAIL ─────────────────────────
+Supports month/from/to; also filters refunds if range supplied
+*/
 router.get("/students/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -240,7 +426,6 @@ router.get("/students/:id", async (req, res) => {
 
     const { from, to } = getDateRange(req.query);
 
-    // If range provided, filter payments through aggregation; else findById
     if (hasRange({ from, to })) {
       const [doc] = await PrePlacementStudent.aggregate([
         { $match: { _id: new mongoose.Types.ObjectId(id) } },
@@ -258,12 +443,41 @@ router.get("/students/:id", async (req, res) => {
                 },
               },
             },
+            refunds: {
+              $filter: {
+                input: { $ifNull: ["$refunds", []] },
+                as: "r",
+                cond: {
+                  $and: [
+                    ...(from ? [{ $gte: ["$$r.date", from] }] : []),
+                    ...(to ? [{ $lt: ["$$r.date", to] }] : []),
+                  ],
+                },
+              },
+            },
           },
         },
         {
           $addFields: {
             totalReceivedInRange: {
               $sum: { $map: { input: "$payments", as: "p", in: "$$p.amount" } },
+            },
+            totalRefundedInRange: {
+              $sum: { $map: { input: "$refunds", as: "r", in: "$$r.amount" } },
+            },
+            netCollectedInRange: {
+              $subtract: [
+                {
+                  $sum: {
+                    $map: { input: "$payments", as: "p", in: "$$p.amount" },
+                  },
+                },
+                {
+                  $sum: {
+                    $map: { input: "$refunds", as: "r", in: "$$r.amount" },
+                  },
+                },
+              ],
             },
           },
         },
@@ -281,29 +495,49 @@ router.get("/students/:id", async (req, res) => {
   }
 });
 
-// -------- PATCH /api/preplacement/students/:id/status -----------------------------
-// Body: { status: "ACTIVE" | "DROPPED" }
+/* ───────────────────────── STATUS (with optional refund) ─────────────────────────
+PATCH /students/:id/status
+Body: { status: "ACTIVE"|"DROPPED", refund?: { amount, date, mode, note }, dropReason? }
+*/
 router.patch("/students/:id/status", async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body || {};
+    const { status, refund, dropReason } = req.body || {};
     if (!mongoose.isValidObjectId(id))
       return res.status(400).json({ error: "Invalid id" });
     if (!PREPLACEMENT_STATUSES.includes(status))
       return res.status(400).json({ error: "Invalid status" });
 
-    const updated = await PrePlacementStudent.findByIdAndUpdate(
-      id,
-      { $set: { status } },
-      { new: true }
-    );
-    if (!updated) return res.status(404).json({ error: "Not found" });
-    res.json(updated);
+    const doc = await PrePlacementStudent.findById(id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    const was = doc.status;
+    doc.status = status;
+    if (status === "DROPPED") {
+      if (!doc.droppedAt) doc.droppedAt = new Date();
+      if (typeof dropReason === "string") doc.dropReason = dropReason.trim();
+      if (refund && toNumber(refund.amount) > 0) {
+        doc.refunds = doc.refunds || [];
+        doc.refunds.push({
+          amount: toNumber(refund.amount),
+          date: parseDateAuto(refund.date),
+          mode: (refund.mode || "").trim(),
+          note: (refund.note || "").trim(),
+        });
+      }
+    }
+
+    recalcTotals(doc);
+    await doc.save();
+    res.json(doc);
   } catch (err) {
     console.error("status update error:", err);
     res.status(500).json({ error: err.message });
   }
 });
+
+/* ───────────────────────── PAYMENTS ───────────────────────── */
+
 router.post("/students/:id/payments", async (req, res) => {
   try {
     const { id } = req.params;
@@ -314,7 +548,7 @@ router.post("/students/:id/payments", async (req, res) => {
     const doc = await PrePlacementStudent.findById(id);
     if (!doc) return res.status(404).json({ error: "Not found" });
 
-    const payment = {
+    doc.payments.push({
       amount: toNumber(p.amount),
       date: parseDateAuto(p.date),
       mode: (p.mode || "").trim(),
@@ -326,8 +560,7 @@ router.post("/students/:id/payments", async (req, res) => {
             .filter(Boolean),
       note: (p.note || "").trim(),
       raw: p.raw || undefined,
-    };
-    doc.payments.push(payment);
+    });
 
     recalcTotals(doc);
     await doc.save();
@@ -337,6 +570,7 @@ router.post("/students/:id/payments", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 router.patch("/students/:id/payments/:index", async (req, res) => {
   try {
     const { id, index } = req.params;
@@ -350,7 +584,7 @@ router.patch("/students/:id/payments/:index", async (req, res) => {
     const body = req.body || {};
     const doc = await PrePlacementStudent.findById(id);
     if (!doc) return res.status(404).json({ error: "Not found" });
-    if (idx >= doc.payments.length)
+    if (idx >= (doc.payments || []).length)
       return res.status(404).json({ error: "Payment not found" });
 
     const p = doc.payments[idx];
@@ -375,6 +609,7 @@ router.patch("/students/:id/payments/:index", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 router.delete("/students/:id/payments/:index", async (req, res) => {
   try {
     const { id, index } = req.params;
@@ -387,7 +622,7 @@ router.delete("/students/:id/payments/:index", async (req, res) => {
 
     const doc = await PrePlacementStudent.findById(id);
     if (!doc) return res.status(404).json({ error: "Not found" });
-    if (idx >= doc.payments.length)
+    if (idx >= (doc.payments || []).length)
       return res.status(404).json({ error: "Payment not found" });
 
     doc.payments.splice(idx, 1);
@@ -400,43 +635,96 @@ router.delete("/students/:id/payments/:index", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-router.get("/search", async (req, res) => {
+
+/* ───────────────────────── REFUNDS ───────────────────────── */
+
+router.post("/students/:id/refunds", async (req, res) => {
   try {
-    const q = String(req.query.q || "").trim();
-    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-    const limit = Math.min(
-      Math.max(parseInt(req.query.limit || "10", 10), 1),
-      50
-    );
-    const skip = (page - 1) * limit;
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid id" });
+    const r = req.body || {};
 
-    const { status, course } = req.query;
-    const match = {};
-    if (q) {
-      const rx = { $regex: q, $options: "i" };
-      match.$or = [{ name: rx }, { courseName: rx }];
-    }
-    if (status && PREPLACEMENT_STATUSES.includes(status)) match.status = status;
-    if (course) match.courseName = { $regex: String(course), $options: "i" };
+    const doc = await PrePlacementStudent.findById(id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
 
-    const [rows, total] = await Promise.all([
-      PrePlacementStudent.find(match, {
-        name: 1,
-        courseName: 1,
-        status: 1,
-        totalFee: 1,
-        totalReceived: 1,
-        remainingFee: 1,
-      })
-        .sort({ name: 1 })
-        .skip(skip)
-        .limit(limit),
-      PrePlacementStudent.countDocuments(match),
-    ]);
+    doc.refunds = doc.refunds || [];
+    doc.refunds.push({
+      amount: toNumber(r.amount),
+      date: parseDateAuto(r.date),
+      mode: (r.mode || "").trim(),
+      note: (r.note || "").trim(),
+    });
 
-    res.json({ page, limit, total, rows });
+    recalcTotals(doc);
+    await doc.save();
+    res.json(doc);
   } catch (err) {
-    console.error("search error:", err);
+    console.error("add refund error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch("/students/:id/refunds/:index", async (req, res) => {
+  try {
+    const { id, index } = req.params;
+    if (!mongoose.isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid id" });
+
+    const idx = parseInt(index, 10);
+    if (!Number.isInteger(idx) || idx < 0)
+      return res.status(400).json({ error: "Invalid index" });
+
+    const body = req.body || {};
+    const doc = await PrePlacementStudent.findById(id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    if (idx >= (doc.refunds || []).length)
+      return res.status(404).json({ error: "Refund not found" });
+
+    const r = doc.refunds[idx];
+    if (body.amount !== undefined) r.amount = toNumber(body.amount);
+    if (body.date !== undefined) r.date = parseDateAuto(body.date);
+    if (body.mode !== undefined) r.mode = String(body.mode || "").trim();
+    if (body.note !== undefined) r.note = String(body.note || "").trim();
+
+    recalcTotals(doc);
+    await doc.save();
+    res.json(doc);
+  } catch (err) {
+    console.error("update refund error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete("/students/:id/refunds/:index", async (req, res) => {
+  try {
+    const { id, index } = req.params;
+    if (!mongoose.isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid id" });
+
+    const idx = Number.parseInt(index, 10);
+    if (!Number.isInteger(idx) || idx < 0)
+      return res.status(400).json({ error: "Invalid index" });
+
+    const doc = await PrePlacementStudent.findById(id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    // ensure array exists
+    doc.refunds = doc.refunds || [];
+    if (idx >= doc.refunds.length)
+      return res.status(404).json({ error: "Refund not found" });
+
+    doc.refunds.splice(idx, 1);
+    // optional but safe:
+    doc.markModified("refunds");
+
+    // Recalculate rollups (see helper below) OR rely on your model's pre('save')
+    recalcTotals(doc);
+
+    await doc.save();
+    res.json(doc);
+  } catch (err) {
+    console.error("delete refund error:", err);
     res.status(500).json({ error: err.message });
   }
 });
