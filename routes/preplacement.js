@@ -57,7 +57,8 @@ function recalcTotals(doc) {
   doc.totalReceived = paid; // gross in
   doc.totalRefunded = refunded; // out
   doc.netCollected = net; // in - out
-  doc.remainingFee = Math.max(toNumber(doc.totalFee) - net, 0);
+  const rawRemaining = Math.max(toNumber(doc.totalFee) - net, 0);
+  doc.remainingFee = doc.status === "DROPPED" ? 0 : rawRemaining;
 }
 
 /* ───────────────────────── SUMMARY ─────────────────────────
@@ -101,7 +102,9 @@ router.get("/summary", async (req, res) => {
               },
             ],
           },
-          remainingFee: 1,
+          remainingFee: {
+            $cond: [{ $eq: ["$status", "DROPPED"] }, 0, "$remainingFee"],
+          },
           txns: {
             $concatArrays: [
               {
@@ -296,7 +299,9 @@ router.get("/students", async (req, res) => {
                 totalReceived: 1, // gross
                 totalRefunded: 1,
                 netCollected: 1, // NEW net
-                remainingFee: 1,
+                remainingFee: {
+                  $cond: [{ $eq: ["$status", "DROPPED"] }, 0, "$remainingFee"],
+                },
                 status: 1,
                 dueDate: 1,
                 createdAt: 1,
@@ -478,6 +483,9 @@ router.get("/students/:id", async (req, res) => {
                   },
                 },
               ],
+            },
+            remainingFee: {
+              $cond: [{ $eq: ["$status", "DROPPED"] }, 0, "$remainingFee"],
             },
           },
         },
@@ -695,6 +703,7 @@ router.patch("/students/:id/refunds/:index", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// UPDATE (full) a pre-placement student, optionally replacing payments/refunds
 router.put("/students/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -769,6 +778,7 @@ router.put("/students/:id", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 router.delete("/students/:id/refunds/:index", async (req, res) => {
   try {
     const { id, index } = req.params;
