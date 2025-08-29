@@ -695,7 +695,80 @@ router.patch("/students/:id/refunds/:index", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+router.put("/students/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid id" });
 
+    const b = req.body || {};
+    const doc = await PrePlacementStudent.findById(id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    // ---- top-level fields ----
+    if (typeof b.name === "string") {
+      const name = b.name.trim();
+      if (!name) return res.status(400).json({ error: "Name is required" });
+      doc.name = name;
+      doc.nameKey = normalizeName(name);
+    }
+    if (typeof b.courseName === "string") doc.courseName = b.courseName.trim();
+    if (typeof b.terms === "string") doc.terms = b.terms.trim();
+    if (b.totalFee !== undefined) doc.totalFee = toNumber(b.totalFee);
+    if (b.dueDate !== undefined) doc.dueDate = parseDateAuto(b.dueDate);
+
+    if (b.status && PREPLACEMENT_STATUSES.includes(b.status)) {
+      doc.status = b.status;
+      if (b.status === "DROPPED" && !doc.droppedAt) doc.droppedAt = new Date();
+      if (typeof b.dropReason === "string") {
+        doc.dropReason = b.dropReason.trim() || undefined;
+      }
+    }
+
+    // ---- replace payments if provided ----
+    if (Array.isArray(b.payments)) {
+      doc.payments = b.payments.map((p) => ({
+        amount: toNumber(p.amount),
+        date: parseDateAuto(p.date),
+        mode: (p.mode || "").trim(),
+        receiptNos: Array.isArray(p.receiptNos)
+          ? p.receiptNos.map((x) => String(x).trim()).filter(Boolean)
+          : String(p.receiptNos || "")
+              .split(",")
+              .map((x) => x.trim())
+              .filter(Boolean),
+        note: (p.note || "").trim(),
+        raw: p.raw || undefined,
+      }));
+    }
+
+    // ---- optionally replace refunds too (if you send them) ----
+    if (Array.isArray(b.refunds)) {
+      doc.refunds = b.refunds.map((r) => ({
+        amount: toNumber(r.amount),
+        date: parseDateAuto(r.date),
+        mode: (r.mode || "").trim(),
+        note: (r.note || "").trim(),
+      }));
+    } else if (!doc.refunds) {
+      doc.refunds = [];
+    }
+
+    // roll-ups
+    recalcTotals(doc);
+
+    await doc.save();
+    res.json(doc);
+  } catch (err) {
+    if (err?.code === 11000) {
+      return res
+        .status(409)
+        .json({ error: "Another student already uses that name" });
+    }
+    console.error("update student error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 router.delete("/students/:id/refunds/:index", async (req, res) => {
   try {
     const { id, index } = req.params;
