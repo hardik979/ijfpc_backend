@@ -82,12 +82,11 @@ router.get("/summary", async (req, res) => {
           },
         }
       : null;
-
     const pipeline = [
       { $match: match },
-      // Build a combined "txns" array with payments (+) and refunds (-)
       {
         $project: {
+          status: 1, // <— add status so we can count by it
           totalFee: 1,
           totalReceived: 1,
           totalRefunded: { $ifNull: ["$totalRefunded", 0] },
@@ -111,7 +110,7 @@ router.get("/summary", async (req, res) => {
                 $map: {
                   input: { $ifNull: ["$payments", []] },
                   as: "p",
-                  in: { date: "$$p.date", amount: "$$p.amount" }, // +
+                  in: { date: "$$p.date", amount: "$$p.amount" },
                 },
               },
               {
@@ -121,7 +120,7 @@ router.get("/summary", async (req, res) => {
                   in: {
                     date: "$$r.date",
                     amount: { $multiply: ["$$r.amount", -1] },
-                  }, // -
+                  },
                 },
               },
             ],
@@ -136,17 +135,19 @@ router.get("/summary", async (req, res) => {
                 _id: null,
                 totalStudents: { $sum: 1 },
                 totalFee: { $sum: "$totalFee" },
-                totalReceived: { $sum: "$totalReceived" }, // gross
+                totalReceived: { $sum: "$totalReceived" },
                 totalRefunded: { $sum: "$totalRefunded" },
                 netCollected: { $sum: "$netCollected" },
                 remainingFee: { $sum: "$remainingFee" },
               },
             },
           ],
+          // NEW: counts by status
+          byStatus: [{ $group: { _id: "$status", count: { $sum: 1 } } }],
           collectedInRange: [
             { $unwind: { path: "$txns", preserveNullAndEmptyArrays: false } },
             ...(dateMatch ? [{ $match: dateMatch }] : []),
-            { $group: { _id: null, collected: { $sum: "$txns.amount" } } }, // NET in range
+            { $group: { _id: null, collected: { $sum: "$txns.amount" } } },
           ],
           byMonth: [
             { $unwind: { path: "$txns", preserveNullAndEmptyArrays: false } },
@@ -158,7 +159,7 @@ router.get("/summary", async (req, res) => {
                   y: { $year: "$txns.date" },
                   m: { $month: "$txns.date" },
                 },
-                collected: { $sum: "$txns.amount" }, // NET per month
+                collected: { $sum: "$txns.amount" },
               },
             },
             { $sort: { "_id.y": 1, "_id.m": 1 } },
@@ -169,18 +170,27 @@ router.get("/summary", async (req, res) => {
         $project: {
           totalStudents: { $ifNull: [{ $first: "$overall.totalStudents" }, 0] },
           totalFee: { $ifNull: [{ $first: "$overall.totalFee" }, 0] },
-          totalReceived: { $ifNull: [{ $first: "$overall.totalReceived" }, 0] }, // gross
+          totalReceived: { $ifNull: [{ $first: "$overall.totalReceived" }, 0] },
           totalRefunded: { $ifNull: [{ $first: "$overall.totalRefunded" }, 0] },
           netCollected: { $ifNull: [{ $first: "$overall.netCollected" }, 0] },
           remainingFee: { $ifNull: [{ $first: "$overall.remainingFee" }, 0] },
           collectedInRange: {
             $ifNull: [{ $first: "$collectedInRange.collected" }, 0],
-          }, // NET in range
+          },
           monthly: "$byMonth",
+          // turn [{_id: "ACTIVE", count: n},...] into an object
+          countsByStatus: {
+            $arrayToObject: {
+              $map: {
+                input: "$byStatus",
+                as: "s",
+                in: { k: { $ifNull: ["$$s._id", "UNKNOWN"] }, v: "$$s.count" },
+              },
+            },
+          },
         },
       },
     ];
-
     const [data = {}] = await PrePlacementStudent.aggregate(pipeline);
     res.json({
       ...data,
@@ -382,7 +392,7 @@ router.post("/students", async (req, res) => {
       : [];
 
     // assemble doc
-    const doc = new PrePlacementStudent({
+    const base = {
       name,
       nameKey: normalizeName(name),
       courseName: (b.courseName || "").trim(),
@@ -392,14 +402,23 @@ router.post("/students", async (req, res) => {
       status: b.status || "ACTIVE",
       payments,
       refunds,
-      // allow initializing as dropped
+    };
+
+    const now = new Date();
+
+    const doc = new PrePlacementStudent({
+      ...base,
       ...(b.status === "DROPPED"
         ? {
-            droppedAt: b.droppedAt
-              ? parseDateAuto(b.droppedAt) || new Date()
-              : new Date(),
+            droppedAt: b.droppedAt ? parseDateAuto(b.droppedAt) || now : now,
             dropReason: (b.dropReason || "").trim() || undefined,
           }
+        : {}),
+      ...(b.status === "PAUSED"
+        ? { pausedAt: b.pausedAt ? parseDateAuto(b.pausedAt) || now : now }
+        : {}),
+      ...(b.status === "PLACED"
+        ? { placedAt: b.placedAt ? parseDateAuto(b.placedAt) || now : now }
         : {}),
     });
 
@@ -511,6 +530,7 @@ router.patch("/students/:id/status", async (req, res) => {
   try {
     const { id } = req.params;
     const { status, refund, dropReason } = req.body || {};
+
     if (!mongoose.isValidObjectId(id))
       return res.status(400).json({ error: "Invalid id" });
     if (!PREPLACEMENT_STATUSES.includes(status))
@@ -521,9 +541,20 @@ router.patch("/students/:id/status", async (req, res) => {
 
     const was = doc.status;
     doc.status = status;
+
+    // clear dropReason if moving away from DROPPED
+    if (was === "DROPPED" && status !== "DROPPED") {
+      doc.dropReason = undefined;
+    }
+
+    const now = new Date();
+
     if (status === "DROPPED") {
-      if (!doc.droppedAt) doc.droppedAt = new Date();
-      if (typeof dropReason === "string") doc.dropReason = dropReason.trim();
+      if (!doc.droppedAt) doc.droppedAt = now;
+      if (typeof dropReason === "string")
+        doc.dropReason = dropReason.trim() || undefined;
+
+      // optional refund on drop
       if (refund && toNumber(refund.amount) > 0) {
         doc.refunds = doc.refunds || [];
         doc.refunds.push({
@@ -533,6 +564,16 @@ router.patch("/students/:id/status", async (req, res) => {
           note: (refund.note || "").trim(),
         });
       }
+    } else if (status === "PAUSED") {
+      if (!doc.pausedAt) doc.pausedAt = now;
+    } else if (status === "PLACED") {
+      if (!doc.placedAt) doc.placedAt = now;
+    } else if (status === "ACTIVE") {
+      // Optional: when re-activating, you might want to clear pausedAt.
+      // Comment out if you prefer to keep history.
+      // doc.pausedAt = undefined;
+      // doc.droppedAt = undefined; // usually you keep this; uncomment if you want to clear
+      // doc.placedAt = undefined;  // usually keep; uncomment if you want to clear
     }
 
     recalcTotals(doc);
@@ -725,13 +766,33 @@ router.put("/students/:id", async (req, res) => {
     if (typeof b.terms === "string") doc.terms = b.terms.trim();
     if (b.totalFee !== undefined) doc.totalFee = toNumber(b.totalFee);
     if (b.dueDate !== undefined) doc.dueDate = parseDateAuto(b.dueDate);
-
     if (b.status && PREPLACEMENT_STATUSES.includes(b.status)) {
+      const now = new Date();
       doc.status = b.status;
-      if (b.status === "DROPPED" && !doc.droppedAt) doc.droppedAt = new Date();
-      if (typeof b.dropReason === "string") {
-        doc.dropReason = b.dropReason.trim() || undefined;
+
+      if (b.status === "DROPPED") {
+        if (!doc.droppedAt) doc.droppedAt = now;
+        if (typeof b.dropReason === "string") {
+          doc.dropReason = b.dropReason.trim() || undefined;
+        }
+      } else {
+        // clear dropReason if not dropped
+        doc.dropReason = undefined;
       }
+
+      if (b.status === "PAUSED" && !doc.pausedAt) {
+        doc.pausedAt = b.pausedAt ? parseDateAuto(b.pausedAt) || now : now;
+      }
+      if (b.status === "PLACED" && !doc.placedAt) {
+        doc.placedAt = b.placedAt ? parseDateAuto(b.placedAt) || now : now;
+      }
+
+      // Optional clearing on ACTIVE (comment out if you prefer keeping history)
+      // if (b.status === "ACTIVE") {
+      //   doc.pausedAt = undefined;
+      //   // doc.droppedAt = undefined;
+      //   // doc.placedAt = undefined;
+      // }
     }
 
     // ---- replace payments if provided ----

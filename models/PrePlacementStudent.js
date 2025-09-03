@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
-export const PREPLACEMENT_STATUSES = ["ACTIVE", "DROPPED"];
+
+export const PREPLACEMENT_STATUSES = ["ACTIVE", "DROPPED", "PAUSED", "PLACED"];
 
 const PaymentSchema = new mongoose.Schema(
   {
@@ -13,7 +14,6 @@ const PaymentSchema = new mongoose.Schema(
   { _id: false }
 );
 
-// NEW: refunds you issued to the student
 const RefundSchema = new mongoose.Schema(
   {
     amount: { type: Number, required: true, min: 0 },
@@ -36,13 +36,12 @@ const PrePlacementStudentSchema = new mongoose.Schema(
 
     payments: { type: [PaymentSchema], default: [] },
 
-    // NEW: refunds and rollups
     refunds: { type: [RefundSchema], default: [] },
-    totalRefunded: { type: Number, default: 0 }, // sum(refunds.amount)
-    netCollected: { type: Number, default: 0 }, // totalReceived - totalRefunded
+    totalRefunded: { type: Number, default: 0 },
+    netCollected: { type: Number, default: 0 },
 
-    totalReceived: { type: Number, default: 0 }, // sum(payments.amount) (gross in)
-    remainingFee: { type: Number, default: 0 }, // totalFee - netCollected
+    totalReceived: { type: Number, default: 0 },
+    remainingFee: { type: Number, default: 0 },
 
     status: {
       type: String,
@@ -51,9 +50,12 @@ const PrePlacementStudentSchema = new mongoose.Schema(
       index: true,
     },
 
-    // (optional) meta about dropping – handy if you want to store when/why
+    // status metadata (timestamps)
     droppedAt: { type: Date },
     dropReason: { type: String, trim: true },
+
+    pausedAt: { type: Date }, // NEW
+    placedAt: { type: Date }, // NEW
 
     source: {
       provider: { type: String, default: "SheetDB" },
@@ -64,27 +66,32 @@ const PrePlacementStudentSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Recalculate rollups before save
+// Rollups + status timestamping
 PrePlacementStudentSchema.pre("save", function (next) {
   const sum = (arr = []) =>
     (arr || []).reduce((s, x) => s + (Number(x?.amount) || 0), 0);
 
-  const grossIn = sum(this.payments); // what they paid
-  const refunded = sum(this.refunds); // what you returned
-  const net = Math.max(grossIn - refunded, 0); // don't go negative
+  const grossIn = sum(this.payments);
+  const refunded = sum(this.refunds);
+  const net = Math.max(grossIn - refunded, 0);
 
   this.totalReceived = grossIn;
   this.totalRefunded = refunded;
   this.netCollected = net;
   this.remainingFee = Math.max((this.totalFee || 0) - net, 0);
 
-  // convenience: set droppedAt if newly marked DROPPED and missing
-  if (
-    this.isModified("status") &&
-    this.status === "DROPPED" &&
-    !this.droppedAt
-  ) {
-    this.droppedAt = new Date();
+  if (this.isModified("status")) {
+    const now = new Date();
+
+    if (this.status === "DROPPED" && !this.droppedAt) {
+      this.droppedAt = now;
+    }
+    if (this.status === "PAUSED" && !this.pausedAt) {
+      this.pausedAt = now;
+    }
+    if (this.status === "PLACED" && !this.placedAt) {
+      this.placedAt = now;
+    }
   }
 
   next();

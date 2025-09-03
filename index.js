@@ -14,6 +14,7 @@ import cloudinaryRoutes from "./routes/cloudinary.routes.js";
 import EnrollmentRequest from "./routes/enrollments.js";
 import prePlacementRoutes from "./routes/preplacement.js";
 import demoUsersRouter from "./routes/demoUsers.js";
+import dashboardRoutes from "./routes/dashboardRoutes.js";
 const app = express();
 const allowedOrigins = [
   "https://dashboard.itjobsfactory.com",
@@ -40,6 +41,8 @@ app.use("/api/cloudinary", cloudinaryRoutes);
 app.use("/api/enrollments", EnrollmentRequest);
 app.use("/api/preplacement", prePlacementRoutes);
 app.use("/api/demo-users", demoUsersRouter);
+app.use("/api/dashboard", dashboardRoutes);
+
 connectDB();
 
 const PORT = process.env.PORT || 8000;
