@@ -13,16 +13,20 @@ import hrRoutes from "./routes/hr.js";
 import cloudinaryRoutes from "./routes/cloudinary.routes.js";
 import EnrollmentRequest from "./routes/enrollments.js";
 import prePlacementRoutes from "./routes/preplacement.js";
+import demoUsersRouter from "./routes/demoUsers.js";
 const app = express();
+const allowedOrigins = [
+  "https://dashboard.itjobsfactory.com",
+  "https://ijf-api-demo.vercel.app",
+];
 
 //Middleware
 app.use(
   cors({
-    origin: "https://dashboard.itjobsfactory.com",
+    origin: allowedOrigins,
     credentials: true,
   })
 );
-
 app.use(express.json());
 
 app.use("/api/students", studentRoutes);
@@ -35,6 +39,7 @@ app.use("/api/hr", hrRoutes);
 app.use("/api/cloudinary", cloudinaryRoutes);
 app.use("/api/enrollments", EnrollmentRequest);
 app.use("/api/preplacement", prePlacementRoutes);
+app.use("/api/demo-users", demoUsersRouter);
 connectDB();
 
 const PORT = process.env.PORT || 8000;

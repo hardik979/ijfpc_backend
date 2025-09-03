@@ -10,6 +10,18 @@ export const PAYMENT_MODES = [
   "OTHER",
 ];
 
+/* NEW: Company Experience (all optional) */
+const CompanyExperienceSchema = new mongoose.Schema(
+  {
+    companyName: { type: String, trim: true, default: "" },
+    yearsOfExperience: { type: Number, min: 0, default: null },
+    pf: { type: Boolean, default: null }, // true/false, null if unknown
+    doj: { type: Date, default: null }, // Date of joining
+    doe: { type: Date, default: null }, // Date of exit
+  },
+  { _id: false }
+);
+
 const InstallmentSchema = new mongoose.Schema(
   {
     label: { type: String, required: true, trim: true }, // e.g. "1ST INSTALLMENT"
@@ -45,6 +57,12 @@ const PostPlacementOfferSchema = new mongoose.Schema(
     remainingFee: { type: Number, default: 0 }, // auto-kept in sync
     remainingFeeNote: { type: String, trim: true },
 
+    /* NEW: single “companyExperience” block (optional) */
+    companyExperience: {
+      type: CompanyExperienceSchema,
+      default: () => ({}), // creates the subdoc and applies defaults on NEW docs
+    },
+
     dedupeKey: { type: String, unique: true, index: true },
     source: { type: String, default: "sheetdb" },
   },
@@ -70,7 +88,6 @@ PostPlacementOfferSchema.index({
   companyName: 1,
   offerDate: -1,
 });
-// speed lookups & grouping
 PostPlacementOfferSchema.index({ "hr.email": 1 });
 PostPlacementOfferSchema.index({ "hr.contactNumber": 1 });
 

@@ -37,7 +37,7 @@ function toRecordRow(doc, { overdueDays = 0 } = {}) {
     const anchor = lastPayment || doc.offerDate;
     if (daysBetween(anchor) > overdueDays) status = "overdue";
   }
-
+  const ce = doc.companyExperience || {};
   return {
     _id: String(doc._id),
 
@@ -51,6 +51,15 @@ function toRecordRow(doc, { overdueDays = 0 } = {}) {
 
     company: doc.companyName || "",
     location: doc.location || "",
+    companyExperience: {
+      companyName: ce.companyName || "",
+      yearsOfExperience: Number.isFinite(ce.yearsOfExperience)
+        ? ce.yearsOfExperience
+        : null,
+      pf: typeof ce.pf === "boolean" ? ce.pf : null,
+      doj: toISODate(ce.doj),
+      doe: toISODate(ce.doe),
+    },
 
     // UI expects string like "4 LPA"
     package: Number.isFinite(doc.packageLPA) ? `${doc.packageLPA} LPA` : "",
@@ -75,7 +84,35 @@ function toRecordRow(doc, { overdueDays = 0 } = {}) {
     raw: doc, // handy in your drawer
   };
 }
+const updateOffer = async (req, res) => {
+  try {
+    const doc = await PostPlacementOffer.findById(req.params.id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
 
+    if (req.body.companyExperience) {
+      const b = req.body.companyExperience;
+      req.body.companyExperience = {
+        companyName: b.companyName ?? "",
+        yearsOfExperience:
+          b.yearsOfExperience === "" || b.yearsOfExperience == null
+            ? null
+            : Number(b.yearsOfExperience),
+        pf:
+          b.pf === "" || b.pf === undefined
+            ? null
+            : b.pf === true || String(b.pf).toLowerCase() === "true",
+        doj: b.doj || null,
+        doe: b.doe || null,
+      };
+    }
+
+    Object.assign(doc, req.body);
+    await doc.save();
+    res.json(toRecordRow(doc.toObject(), { overdueDays: 0 }));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+};
 /* ───────────────────────── list/fetch ───────────────────────── */
 
 /**
@@ -194,19 +231,8 @@ router.post("/offers", async (req, res) => {
 });
 
 /** UPDATE offer fields (triggers pre('save') in model if you switch to findById+save) */
-router.patch("/offers/:id", async (req, res) => {
-  try {
-    // Use findById -> assign -> save to ensure your model's pre('save') runs
-    const doc = await PostPlacementOffer.findById(req.params.id);
-    if (!doc) return res.status(404).json({ error: "Not found" });
-    Object.assign(doc, req.body);
-    await doc.save();
-    res.json(toRecordRow(doc.toObject(), { overdueDays: 0 }));
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
+router.patch("/offers/:id", updateOffer);
+router.put("/offers/:id", updateOffer);
 /** DELETE offer (optional) */
 router.delete("/offers/:id", async (req, res) => {
   try {
