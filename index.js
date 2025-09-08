@@ -16,10 +16,7 @@ import prePlacementRoutes from "./routes/preplacement.js";
 import demoUsersRouter from "./routes/demoUsers.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
 const app = express();
-const allowedOrigins = [
-  "https://dashboard.itjobsfactory.com",
-  "https://ijf-api-demo.vercel.app",
-];
+const allowedOrigins = "https://dashboard.itjobsfactory.com";
 
 //Middleware
 app.use(
