@@ -872,5 +872,377 @@ router.delete("/students/:id/refunds/:index", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// ───────────────────────── DUE NOTIFICATIONS ─────────────────────────
+// GET /preplacement/due-notifications?date=YYYY-MM-DD&daysBefore=5&tz=Asia/Kolkata&includeStatuses=ACTIVE,PAUSED,PLACED
+router.get("/due-notifications", async (req, res) => {
+  try {
+    const {
+      date, // anchor date (local) for computing buckets; default: today
+      daysBefore = "5", // N for "due in N days"
+      tz = "Asia/Kolkata", // dashboard TZ
+      includeStatuses, // comma list; default excludes DROPPED
+    } = req.query;
+
+    const N = Math.max(parseInt(String(daysBefore), 10) || 5, 0);
+
+    // Parse anchor date and normalize it to "start of day" in TZ inside the pipeline.
+    // We pass JS Date; $dateTrunc will handle TZ correctly.
+    const refDate = date ? new Date(String(date)) : new Date();
+
+    // Build allowed statuses (default: everything except DROPPED)
+    let statusFilter;
+    if (typeof includeStatuses === "string" && includeStatuses.trim()) {
+      const allow = includeStatuses
+        .split(",")
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean);
+      statusFilter = { status: { $in: allow } };
+    } else {
+      statusFilter = { status: { $ne: "DROPPED" } };
+    }
+
+    const pipeline = [
+      {
+        $match: {
+          ...statusFilter,
+          remainingFee: { $gt: 0 },
+          dueDate: { $type: "date" },
+        },
+      },
+      // Compute "start of day" for both the reference date and each doc's due date in the given TZ
+      {
+        $addFields: {
+          refStart: {
+            $dateTrunc: { date: refDate, unit: "day", timezone: tz },
+          },
+          dueStart: {
+            $dateTrunc: { date: "$dueDate", unit: "day", timezone: tz },
+          },
+        },
+      },
+      {
+        $addFields: {
+          daysUntilDue: {
+            $dateDiff: { start: "$refStart", end: "$dueStart", unit: "day" },
+          },
+        },
+      },
+      {
+        $project: {
+          name: 1,
+          courseName: 1,
+          status: 1,
+          dueDate: 1,
+          remainingFee: 1,
+          netCollected: 1,
+          daysUntilDue: 1,
+        },
+      },
+      {
+        $facet: {
+          dueToday: [
+            { $match: { daysUntilDue: 0 } },
+            { $sort: { dueDate: 1 } },
+          ],
+          dueInN: [{ $match: { daysUntilDue: N } }, { $sort: { dueDate: 1 } }],
+          overdue: [
+            { $match: { daysUntilDue: { $lt: 0 } } },
+            { $sort: { dueDate: 1 } },
+          ],
+        },
+      },
+      {
+        $addFields: {
+          counts: {
+            dueToday: { $size: "$dueToday" },
+            dueInN: { $size: "$dueInN" },
+            overdue: { $size: "$overdue" },
+          },
+        },
+      },
+      {
+        $project: {
+          dueToday: 1,
+          dueInN: 1,
+          overdue: 1,
+          counts: 1,
+        },
+      },
+    ];
+
+    const [
+      out = {
+        dueToday: [],
+        dueInN: [],
+        overdue: [],
+        counts: { dueToday: 0, dueInN: 0, overdue: 0 },
+      },
+    ] = await PrePlacementStudent.aggregate(pipeline);
+
+    // Helpful UI strings for your “update” notifications
+    const messages = {
+      dueToday: "Today is the due date.",
+      dueInN: `Due date in ${N} day${N === 1 ? "" : "s"}.`,
+      overdue: "Due date has passed.",
+    };
+
+    return res.json({
+      anchorDate: refDate, // JS date (UTC) used; client can format to IST
+      timezone: tz,
+      daysBefore: N,
+      counts: out.counts,
+      buckets: {
+        dueToday: out.dueToday.map((s) => ({
+          ...s,
+          message: messages.dueToday,
+        })),
+        dueInN: out.dueInN.map((s) => ({
+          ...s,
+          message: messages.dueInN,
+        })),
+        overdue: out.overdue.map((s) => ({
+          ...s,
+          daysOverdue: Math.abs(s.daysUntilDue), // positive count of days late
+          message: messages.overdue,
+        })),
+      },
+    });
+  } catch (err) {
+    console.error("due-notifications error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+// PATCH /preplacement/students/:id/reminders
+// Body: { type: "FIVE_DAY" | "DUE_DAY" }
+router.patch("/students/:id/reminders", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid id" });
+    const { type } = req.body || {};
+    if (!["FIVE_DAY", "DUE_DAY"].includes(type))
+      return res.status(400).json({ error: "Invalid type" });
+
+    const doc = await PrePlacementStudent.findById(id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    doc.reminders = doc.reminders || {};
+    const now = new Date();
+    if (type === "FIVE_DAY") doc.reminders.fiveDaySentOn = now;
+    if (type === "DUE_DAY") doc.reminders.dueDaySentOn = now;
+
+    await doc.save();
+    res.json({ ok: true, reminders: doc.reminders });
+  } catch (err) {
+    console.error("reminders ack error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+// GET /preplacement/notifications?daysBefore=5&tz=Asia/Kolkata&page=1&limit=50&includeStatuses=ACTIVE,PAUSED,PLACED
+router.get("/notifications", async (req, res) => {
+  try {
+    const {
+      daysBefore = "5",
+      tz = "Asia/Kolkata",
+      includeStatuses, // optional: comma list; default excludes DROPPED
+      page: pageStr = "1",
+      limit: limitStr = "50",
+      date, // optional anchor date (YYYY-MM-DD) for testing
+    } = req.query;
+
+    const N = Math.max(parseInt(String(daysBefore), 10) || 5, 0);
+    const refDate = date ? new Date(String(date)) : new Date();
+
+    let statusFilter;
+    if (typeof includeStatuses === "string" && includeStatuses.trim()) {
+      const allow = includeStatuses
+        .split(",")
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean);
+      statusFilter = { status: { $in: allow } };
+    } else {
+      statusFilter = { status: { $ne: "DROPPED" } };
+    }
+
+    const page = Math.max(parseInt(pageStr, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(limitStr, 10) || 50, 1), 200);
+    const skip = (page - 1) * limit;
+
+    // Build the three buckets using one aggregation, then flatten in JS
+    const pipeline = [
+      {
+        $match: {
+          ...statusFilter,
+          remainingFee: { $gt: 0 },
+          dueDate: { $type: "date" },
+        },
+      },
+      {
+        $addFields: {
+          refStart: {
+            $dateTrunc: { date: refDate, unit: "day", timezone: tz },
+          },
+          dueStart: {
+            $dateTrunc: { date: "$dueDate", unit: "day", timezone: tz },
+          },
+        },
+      },
+      {
+        $addFields: {
+          daysUntilDue: {
+            $dateDiff: {
+              startDate: "$refStart",
+              endDate: "$dueStart",
+              unit: "day",
+            },
+          },
+        },
+      },
+      {
+        $project: {
+          name: 1,
+          courseName: 1,
+          status: 1,
+          dueDate: 1,
+          remainingFee: 1,
+          daysUntilDue: 1,
+          "reminders.fiveDaySeenAt": 1,
+          "reminders.dueDaySeenAt": 1,
+          "reminders.firstOverdueSeenAt": 1,
+        },
+      },
+      {
+        $facet: {
+          dueToday: [
+            { $match: { daysUntilDue: 0 } },
+            { $sort: { dueDate: 1 } },
+          ],
+          dueInN: [{ $match: { daysUntilDue: N } }, { $sort: { dueDate: 1 } }],
+          overdue: [
+            { $match: { daysUntilDue: { $lt: 0 } } },
+            { $sort: { dueDate: 1 } },
+          ],
+          counts: [
+            {
+              $group: {
+                _id: null,
+                dueToday: {
+                  $sum: { $cond: [{ $eq: ["$daysUntilDue", 0] }, 1, 0] },
+                },
+                dueInN: {
+                  $sum: { $cond: [{ $eq: ["$daysUntilDue", N] }, 1, 0] },
+                },
+                overdue: {
+                  $sum: { $cond: [{ $lt: ["$daysUntilDue", 0] }, 1, 0] },
+                },
+              },
+            },
+          ],
+        },
+      },
+    ];
+
+    const [out] = await PrePlacementStudent.aggregate(pipeline);
+    const dueToday = out?.dueToday || [];
+    const dueInN = out?.dueInN || [];
+    const overdue = out?.overdue || [];
+    const counts = out?.counts?.[0] || { dueToday: 0, dueInN: 0, overdue: 0 };
+
+    // Flatten to inbox items with a type and seen flag
+    const items = [
+      ...overdue.map((s) => ({
+        studentId: s._id,
+        type: "OVERDUE",
+        title: `${s.name} – Overdue`,
+        message: "Due date has passed.",
+        dueDate: s.dueDate,
+        remainingFee: s.remainingFee,
+        courseName: s.courseName,
+        urgencyRank: 1, // highest
+        seen: !!s?.reminders?.firstOverdueSeenAt,
+        seenAt: s?.reminders?.firstOverdueSeenAt || null,
+        daysUntilDue: s.daysUntilDue, // negative
+      })),
+      ...dueToday.map((s) => ({
+        studentId: s._id,
+        type: "DUE_DAY",
+        title: `${s.name} – Due today`,
+        message: "Today is the due date.",
+        dueDate: s.dueDate,
+        remainingFee: s.remainingFee,
+        courseName: s.courseName,
+        urgencyRank: 2,
+        seen: !!s?.reminders?.dueDaySeenAt,
+        seenAt: s?.reminders?.dueDaySeenAt || null,
+        daysUntilDue: s.daysUntilDue, // 0
+      })),
+      ...dueInN.map((s) => ({
+        studentId: s._id,
+        type: "FIVE_DAY",
+        title: `${s.name} – Due in ${N} days`,
+        message: `Due date in ${N} day${N === 1 ? "" : "s"}.`,
+        dueDate: s.dueDate,
+        remainingFee: s.remainingFee,
+        courseName: s.courseName,
+        urgencyRank: 3,
+        seen: !!s?.reminders?.fiveDaySeenAt,
+        seenAt: s?.reminders?.fiveDaySeenAt || null,
+        daysUntilDue: s.daysUntilDue, // N
+      })),
+    ];
+
+    // Sort: unseen first, then urgency, then nearest due date
+    items.sort((a, b) => {
+      if (a.seen !== b.seen) return a.seen ? 1 : -1;
+      if (a.urgencyRank !== b.urgencyRank) return a.urgencyRank - b.urgencyRank;
+      return new Date(a.dueDate) - new Date(b.dueDate);
+    });
+
+    const total = items.length;
+    const pageItems = items.slice(skip, skip + limit);
+
+    return res.json({
+      anchorDate: refDate,
+      timezone: tz,
+      daysBefore: N,
+      counts,
+      page,
+      limit,
+      total,
+      rows: pageItems,
+    });
+  } catch (err) {
+    console.error("notifications error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+// PATCH /preplacement/notifications/:studentId/seen
+// Body: { type: "FIVE_DAY" | "DUE_DAY" | "OVERDUE" }
+router.patch("/notifications/:studentId/seen", async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { type } = req.body || {};
+
+    if (!mongoose.isValidObjectId(studentId))
+      return res.status(400).json({ error: "Invalid studentId" });
+    if (!["FIVE_DAY", "DUE_DAY", "OVERDUE"].includes(type))
+      return res.status(400).json({ error: "Invalid type" });
+
+    const doc = await PrePlacementStudent.findById(studentId);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    const now = new Date();
+    doc.reminders = doc.reminders || {};
+    if (type === "FIVE_DAY") doc.reminders.fiveDaySeenAt = now;
+    if (type === "DUE_DAY") doc.reminders.dueDaySeenAt = now;
+    if (type === "OVERDUE") doc.reminders.firstOverdueSeenAt = now;
+
+    await doc.save();
+    return res.json({ ok: true, reminders: doc.reminders });
+  } catch (err) {
+    console.error("notifications seen error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 export default router;

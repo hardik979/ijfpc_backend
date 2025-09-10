@@ -16,7 +16,7 @@ import prePlacementRoutes from "./routes/preplacement.js";
 import demoUsersRouter from "./routes/demoUsers.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
 const app = express();
-const allowedOrigins = "https://dashboard.itjobsfactory.com";
+const allowedOrigins = "http://localhost:3000";
 
 //Middleware
 app.use(

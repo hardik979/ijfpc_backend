@@ -96,6 +96,6 @@ PrePlacementStudentSchema.pre("save", function (next) {
 
   next();
 });
-
+PrePlacementStudentSchema.index({ status: 1, dueDate: 1, remainingFee: 1 });
 export default mongoose.models.PrePlacementStudent ||
   mongoose.model("PrePlacementStudent", PrePlacementStudentSchema);
