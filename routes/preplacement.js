@@ -60,6 +60,20 @@ function recalcTotals(doc) {
   const rawRemaining = Math.max(toNumber(doc.totalFee) - net, 0);
   doc.remainingFee = doc.status === "DROPPED" ? 0 : rawRemaining;
 }
+// Build a Date from separate local date + time strings (fallback 09:00) or a single scheduledAt string.
+// We keep it simple to match your existing code paths (no external TZ lib).
+function parseDateTime({ scheduledAt, date, time, tz = "Asia/Kolkata" }) {
+  if (scheduledAt) {
+    const d = new Date(String(scheduledAt));
+    return isNaN(d) ? null : d;
+  }
+  const dStr = String(date || "").trim();
+  if (!dStr) return null;
+  const tStr = String(time || "09:00").trim(); // HH:mm
+  const isoGuess = `${dStr}T${tStr}:00`;
+  const d = new Date(isoGuess);
+  return isNaN(d) ? null : d;
+}
 
 /* ───────────────────────── SUMMARY ─────────────────────────
 Totals and monthly net collections (payments - refunds)
@@ -217,7 +231,7 @@ router.get("/students", async (req, res) => {
     );
     const skip = (page - 1) * limit;
 
-    const { search, status, course } = req.query;
+    const { search, status, course, zone } = req.query;
     const { from, to } = getDateRange(req.query);
     const includePayments =
       String(req.query.includePayments || "false") === "true";
@@ -230,6 +244,16 @@ router.get("/students", async (req, res) => {
     if (search) {
       const rx = { $regex: String(search), $options: "i" };
       match.$or = [{ name: rx }, { courseName: rx }];
+    }
+    if (zone) {
+      const z = String(zone).toUpperCase();
+      if (["BLUE", "YELLOW", "GREEN"].includes(z)) {
+        match.zone = z;
+        // Zones don't apply to PLACED students. Exclude them unless user explicitly passed a status.
+        if (!status) {
+          match.status = { $ne: "PLACED" };
+        }
+      }
     }
 
     const setRangeFields = hasRange({ from, to })
@@ -313,6 +337,7 @@ router.get("/students", async (req, res) => {
                   $cond: [{ $eq: ["$status", "DROPPED"] }, 0, "$remainingFee"],
                 },
                 status: 1,
+                zone: 1,
                 dueDate: 1,
                 createdAt: 1,
                 updatedAt: 1,
@@ -390,7 +415,10 @@ router.post("/students", async (req, res) => {
           note: (r.note || "").trim(),
         }))
       : [];
-
+    const zoneRaw = (b.zone || "").toUpperCase();
+    const zone = ["BLUE", "YELLOW", "GREEN"].includes(zoneRaw)
+      ? zoneRaw
+      : "BLUE";
     // assemble doc
     const base = {
       name,
@@ -402,8 +430,8 @@ router.post("/students", async (req, res) => {
       status: b.status || "ACTIVE",
       payments,
       refunds,
+      zone, // <— NEW
     };
-
     const now = new Date();
 
     const doc = new PrePlacementStudent({
@@ -1241,6 +1269,230 @@ router.patch("/notifications/:studentId/seen", async (req, res) => {
     return res.json({ ok: true, reminders: doc.reminders });
   } catch (err) {
     console.error("notifications seen error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+// PATCH /preplacement/students/:id/zone
+router.patch("/students/:id/zone", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid id" });
+
+    const z = String(req.body?.zone || "").toUpperCase();
+    if (!["BLUE", "YELLOW", "GREEN"].includes(z))
+      return res.status(400).json({ error: "Invalid zone" });
+
+    const doc = await PrePlacementStudent.findById(id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    // NEW: zones don't apply to placed students
+    if (doc.status === "PLACED") {
+      return res
+        .status(409)
+        .json({ error: "Zones do not apply to PLACED students" });
+    }
+
+    doc.zone = z; // pre('save') sets zoneChangedAt
+    await doc.save();
+    res.json({ ok: true, zone: doc.zone, zoneChangedAt: doc.zoneChangedAt });
+  } catch (err) {
+    console.error("zone update error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+// POST /preplacement/students/:id/interviews
+// Body: { company (req), scheduledAt? OR (date, time), round?, remarks?, status?, createdBy? }
+router.post("/students/:id/interviews", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid id" });
+
+    const b = req.body || {};
+    const company = String(b.company || "").trim();
+    if (!company) return res.status(400).json({ error: "Company is required" });
+
+    const sched = parseDateTime({
+      scheduledAt: b.scheduledAt,
+      date: b.date,
+      time: b.time,
+      tz: b.tz || "Asia/Kolkata",
+    });
+    if (!sched) return res.status(400).json({ error: "Invalid date/time" });
+
+    const doc = await PrePlacementStudent.findById(id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    // optional: auto-set zone to GREEN when an interview is added
+    if (doc.zone !== "GREEN") doc.zone = "GREEN";
+
+    const statusIn = String(b.status || "SCHEDULED").toUpperCase();
+    const status = ["SCHEDULED", "COMPLETED", "CANCELLED"].includes(statusIn)
+      ? statusIn
+      : "SCHEDULED";
+
+    doc.interviews.push({
+      company,
+      scheduledAt: sched,
+      round: String(b.round || "").trim() || undefined,
+      remarks: String(b.remarks || "").trim() || undefined,
+      status,
+      createdBy: String(b.createdBy || "").trim() || undefined,
+    });
+
+    await doc.save();
+
+    const sorted = [...doc.interviews].sort(
+      (a, b) => new Date(b.scheduledAt) - new Date(a.scheduledAt)
+    );
+    res.status(201).json({ ok: true, zone: doc.zone, interviews: sorted });
+  } catch (err) {
+    console.error("add interview error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+// GET /preplacement/students/:id/interviews?month=YYYY-MM or &from=&to=
+router.get("/students/:id/interviews", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid id" });
+
+    const { from, to } = getDateRange(req.query);
+    const doc = await PrePlacementStudent.findById(id).lean();
+    if (doc.status === "PLACED") {
+      return res
+        .status(409)
+        .json({ error: "Cannot add interviews for PLACED students" });
+    }
+
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    let ints = (doc.interviews || []).slice();
+    if (from || to) {
+      ints = ints.filter((iv) => {
+        const d = new Date(iv.scheduledAt);
+        if (isNaN(d)) return false;
+        if (from && d < from) return false;
+        if (to && d >= to) return false;
+        return true;
+      });
+    }
+    ints.sort((a, b) => new Date(b.scheduledAt) - new Date(a.scheduledAt));
+
+    res.json({ studentId: id, zone: doc.zone, interviews: ints });
+  } catch (err) {
+    console.error("list interviews error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+// PATCH /preplacement/students/:id/interviews/:interviewId
+router.patch("/students/:id/interviews/:interviewId", async (req, res) => {
+  try {
+    const { id, interviewId } = req.params;
+    if (!mongoose.isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid id" });
+
+    const doc = await PrePlacementStudent.findById(id);
+    if (doc.status === "PLACED") {
+      return res
+        .status(409)
+        .json({ error: "Cannot update interviews for PLACED students" });
+    }
+
+    if (!doc) return res.status(404).json({ error: "Not found" });
+
+    const iv = doc.interviews.id(interviewId);
+    if (!iv) return res.status(404).json({ error: "Interview not found" });
+
+    const b = req.body || {};
+    if (b.company !== undefined) iv.company = String(b.company || "").trim();
+    if (b.round !== undefined)
+      iv.round = String(b.round || "").trim() || undefined;
+    if (b.remarks !== undefined)
+      iv.remarks = String(b.remarks || "").trim() || undefined;
+
+    if (b.status !== undefined) {
+      const st = String(b.status || "").toUpperCase();
+      if (!["SCHEDULED", "COMPLETED", "CANCELLED"].includes(st))
+        return res.status(400).json({ error: "Invalid status" });
+      iv.status = st;
+    }
+
+    if (
+      b.scheduledAt !== undefined ||
+      b.date !== undefined ||
+      b.time !== undefined
+    ) {
+      const sched = parseDateTime({
+        scheduledAt: b.scheduledAt,
+        date: b.date,
+        time: b.time,
+        tz: b.tz || "Asia/Kolkata",
+      });
+      if (!sched) return res.status(400).json({ error: "Invalid date/time" });
+      iv.scheduledAt = sched;
+    }
+
+    await doc.save();
+    res.json({ ok: true, interview: iv });
+  } catch (err) {
+    console.error("update interview error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+// GET /preplacement/green/interviews?month=YYYY-MM or &from=&to=&company=&round=
+router.get("/green/interviews", async (req, res) => {
+  try {
+    const { from, to } = getDateRange(req.query);
+    const company = String(req.query.company || "").trim();
+    const round = String(req.query.round || "").trim();
+
+    const pipeline = [
+      { $match: { zone: "GREEN", status: { $ne: "PLACED" } } },
+      { $unwind: { path: "$interviews", preserveNullAndEmptyArrays: false } },
+      ...(from || to
+        ? [
+            {
+              $match: {
+                "interviews.scheduledAt": {
+                  ...(from ? { $gte: from } : {}),
+                  ...(to ? { $lt: to } : {}),
+                },
+              },
+            },
+          ]
+        : []),
+      ...(company
+        ? [
+            {
+              $match: {
+                "interviews.company": { $regex: company, $options: "i" },
+              },
+            },
+          ]
+        : []),
+      ...(round
+        ? [{ $match: { "interviews.round": { $regex: round, $options: "i" } } }]
+        : []),
+      { $sort: { "interviews.scheduledAt": -1 } },
+      {
+        $group: {
+          _id: "$_id",
+          name: { $first: "$name" },
+          courseName: { $first: "$courseName" },
+          status: { $first: "$status" },
+          latestInterview: { $first: "$interviews" },
+        },
+      },
+      { $sort: { "latestInterview.scheduledAt": -1 } },
+    ];
+
+    const rows = await PrePlacementStudent.aggregate(pipeline);
+    res.json({ rows });
+  } catch (err) {
+    console.error("green interviews list error:", err);
     res.status(500).json({ error: err.message });
   }
 });
