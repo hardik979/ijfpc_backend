@@ -34,8 +34,8 @@ router.post("/login", loginLimiter, async (req, res) => {
   res.cookie("auth", token, {
     httpOnly: true,
     secure: isProd, // 🔑 false on localhost (HTTP), true in prod (HTTPS)
-    sameSite: "lax",
-    domain: isProd ? ".itjobsfactory.com" : undefined, // 🔑 DO NOT set domain on localhost
+    sameSite: "none",
+
     path: "/",
     maxAge: 7 * 24 * 60 * 60 * 1000,
   });
@@ -47,7 +47,12 @@ router.post("/login", loginLimiter, async (req, res) => {
 
 // POST /auth/logout
 router.post("/logout", (_req, res) => {
-  res.clearCookie("auth", { httpOnly: true, secure: true, sameSite: "lax" });
+  res.clearCookie("auth", {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: "none",
+    path: "/",
+  });
   res.json({ ok: true });
 });
 // GET /api/auth/me
