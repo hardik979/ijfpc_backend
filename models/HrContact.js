@@ -8,18 +8,23 @@ const HrContactSchema = new mongoose.Schema(
     hrName: { type: String, required: true, trim: true },
     email: { type: String, lowercase: true, trim: true },
 
-    // Phone now optional
     phoneRaw: { type: String },
     phoneE164: { type: String },
 
     resource: { type: String, trim: true },
     remarks: { type: String, trim: true },
 
-    // NEW optional fields
-    keySkills: { type: [String], default: [] }, // e.g., ["Java", "Recruitment", "HRIS"]
-    experienceYears: { type: Number }, // e.g., 1.2
-    experienceText: { type: String, trim: true }, // raw text (e.g., "1 year", "1.2 years")
-    profileUrl: { type: String, trim: true }, // e.g., LinkedIn, Naukri profile
+    keySkills: { type: [String], default: [] },
+    experienceYears: { type: Number },
+    experienceText: { type: String, trim: true },
+    profileUrl: { type: String, trim: true },
+
+    // ⬇️ NEW: verifier status
+    status: {
+      type: String,
+      enum: ["red", "yellow", "green"],
+      default: undefined,
+    },
 
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,

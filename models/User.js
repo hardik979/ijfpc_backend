@@ -13,7 +13,11 @@ const UserSchema = new mongoose.Schema(
     name: { type: String, required: true, trim: true },
     email: { type: String, lowercase: true, trim: true, unique: true },
     passwordHash: { type: String, required: true },
-    role: { type: String, enum: ["admin", "employee"], default: "employee" },
+    role: {
+      type: String,
+      enum: ["admin", "employee", "verifier"],
+      default: "employee",
+    }, // ⬅️ added verifier
     isActive: { type: Boolean, default: true },
   },
   { timestamps: true }

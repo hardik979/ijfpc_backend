@@ -1,6 +1,6 @@
 // src/routes/contacts.js
 import express from "express";
-import { requireAuth } from "../middlewares/auth.js";
+import { requireAuth, requireRole } from "../middlewares/auth.js";
 import HrContact from "../models/HrContact.js";
 import { toE164 } from "../utils/phone.js";
 
@@ -127,4 +127,77 @@ router.get("/admin/all", requireAuth, async (req, res) => {
     .lean();
   res.json(data);
 });
+router.get(
+  "/verify/list",
+  requireAuth,
+  requireRole("verifier", "admin"),
+  async (req, res) => {
+    const q = String(req.query.q || "").trim();
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(
+      200,
+      Math.max(1, parseInt(req.query.limit, 10) || 50)
+    );
+
+    const or = [];
+    if (q) {
+      // text fields
+      or.push({ companyName: { $regex: q, $options: "i" } });
+      or.push({ hrName: { $regex: q, $options: "i" } });
+      or.push({ email: { $regex: q, $options: "i" } });
+      or.push({ keySkills: { $elemMatch: { $regex: q, $options: "i" } } });
+
+      // numeric/phone search
+      const digits = q.replace(/\D/g, "");
+      if (digits) {
+        // last digits in raw phone
+        or.push({ phoneRaw: { $regex: `${digits}$` } });
+        // full E.164 if parsable
+        const e164 = toE164(q, "IN");
+        if (e164) or.push({ phoneE164: e164 });
+      }
+    }
+
+    const match = or.length ? { $or: or } : {};
+    const [items, total] = await Promise.all([
+      HrContact.find(match)
+        .select(
+          "_id date companyName hrName email phoneRaw phoneE164 status createdAt"
+        )
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      HrContact.countDocuments(match),
+    ]);
+
+    res.json({ page, limit, total, items });
+  }
+);
+
+/**
+ * PATCH /contacts/:id/status
+ * body: { status: "red" | "yellow" | "green" | null }
+ * roles: verifier, admin
+ */
+router.patch(
+  "/:id/status",
+  requireAuth,
+  requireRole("verifier", "admin"),
+  async (req, res) => {
+    const raw = req.body?.status;
+    const normalized =
+      raw === null || raw === undefined ? null : String(raw).toLowerCase();
+    const allowed = [null, "red", "yellow", "green"];
+    if (!allowed.includes(normalized)) {
+      return res.status(400).json({ error: "Invalid status" });
+    }
+
+    await HrContact.findByIdAndUpdate(req.params.id, {
+      status: normalized || undefined, // store null/undefined the same way
+    });
+
+    res.json({ ok: true });
+  }
+);
 export default router;

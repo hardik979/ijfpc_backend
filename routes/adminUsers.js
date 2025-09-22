@@ -6,7 +6,7 @@ import User from "../models/User.js";
 
 const router = express.Router();
 router.use(requireAuth, requireRole("admin"));
-
+const ALLOWED_ROLES = ["admin", "employee", "verifier"];
 // POST /admin/users  (create employee or another admin)
 router.post("/", async (req, res) => {
   const { username, name, email, password, role = "employee" } = req.body || {};
@@ -36,6 +36,9 @@ router.post("/:id/reset-password", async (req, res) => {
   await User.findByIdAndUpdate(req.params.id, { passwordHash });
   res.json({ ok: true });
 });
+/**
+ * GET /api/admin/users
+ */
 router.get("/users", async (_req, res) => {
   const users = await User.find({})
     .select("_id username name email role isActive createdAt")
@@ -46,18 +49,19 @@ router.get("/users", async (_req, res) => {
 
 /**
  * GET /api/admin/users/check?username=&email=
- * quick availability checks for form UX
  */
 router.get("/users/check", async (req, res) => {
   const { username, email } = req.query || {};
   const out = { usernameAvailable: true, emailAvailable: true };
 
   if (username) {
-    const u = await User.exists({ username: String(username).toLowerCase() });
+    const u = await User.exists({
+      username: String(username).toLowerCase().trim(),
+    });
     out.usernameAvailable = !u;
   }
   if (email) {
-    const e = await User.exists({ email: String(email).toLowerCase() });
+    const e = await User.exists({ email: String(email).toLowerCase().trim() });
     out.emailAvailable = !e;
   }
   res.json(out);
@@ -69,13 +73,8 @@ router.get("/users/check", async (req, res) => {
  */
 router.post("/users", async (req, res) => {
   try {
-    const {
-      username,
-      name,
-      email,
-      password,
-      role = "employee",
-    } = req.body || {};
+    const { username, name, email, password } = req.body || {};
+    let { role = "employee" } = req.body || {};
 
     if (!username || !name || !email || !password) {
       return res.status(400).json({ error: "All fields are required" });
@@ -86,13 +85,16 @@ router.post("/users", async (req, res) => {
         .json({ error: "Password must be at least 8 characters" });
     }
 
+    role = ALLOWED_ROLES.includes(role) ? role : "employee";
+
     const passwordHash = await bcrypt.hash(password, 12);
+
     const doc = await User.create({
       username: String(username).toLowerCase().trim(),
-      name: name.trim(),
+      name: String(name).trim(),
       email: String(email).toLowerCase().trim(),
       passwordHash,
-      role,
+      role, // ✅ supports "verifier"
       isActive: true,
     });
 
