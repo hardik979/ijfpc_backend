@@ -1,0 +1,33 @@
+# dependencies
+node_modules/
+
+# environment variables
+.env
+
+node_modules
+
+.env.*.local
+
+# logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# editor settings
+.vscode/
+.idea/
+
+# Optional: if you use pm2 or similar
+pids/
+*.pid
+*.seed
+
+# Puppeteer Chromium binaries
+**/.local-chromium/
+
