@@ -74,7 +74,7 @@ const PrePlacementStudentSchema = new mongoose.Schema(
     zone: {
       type: String,
       enum: PREPLACEMENT_ZONES,
-      default: "BLUE", // default for new students
+      default: "BLUE",
       index: true,
     },
     zoneChangedAt: { type: Date },
@@ -89,13 +89,18 @@ const PrePlacementStudentSchema = new mongoose.Schema(
     pausedAt: { type: Date },
     placedAt: { type: Date },
 
+    // ---------- NEW: placement computation ----------
+    // earliest payment date found
+    firstPaymentAt: { type: Date, index: true },
+    // bucket: first day of month of (firstPaymentAt + 3 months)
+    placementMonth: { type: Date },
+
     source: {
       provider: { type: String, default: "SheetDB" },
       lastSyncedAt: { type: Date },
       metadata: { type: mongoose.Schema.Types.Mixed },
     },
 
-    // (optional) reminders you already touch in routes
     reminders: {
       fiveDaySentOn: { type: Date },
       dueDaySentOn: { type: Date },
@@ -107,7 +112,26 @@ const PrePlacementStudentSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Rollups + status/zone timestamping
+// ------- helper to compute placementMonth -------
+function startOfMonthUTC(d) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+}
+function addMonthsUTC(d, n) {
+  // creates a date at UTC month boundary to avoid DST/local shifts
+  return new Date(
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + n, d.getUTCDate())
+  );
+}
+function computePlacementMonthFromFirstPayment(firstPaymentAt) {
+  // Your example expects "17-09-2025" -> "December 2025"
+  // i.e. firstPayment + 3 months, bucketed to first day of that month
+  const plus3 = addMonthsUTC(firstPaymentAt, 3);
+  return startOfMonthUTC(
+    new Date(Date.UTC(plus3.getUTCFullYear(), plus3.getUTCMonth(), 1))
+  );
+}
+
+// Rollups + status/zone timestamping + placementMonth calculation
 PrePlacementStudentSchema.pre("save", function (next) {
   const sum = (arr = []) =>
     (arr || []).reduce((s, x) => s + (Number(x?.amount) || 0), 0);
@@ -132,13 +156,37 @@ PrePlacementStudentSchema.pre("save", function (next) {
     this.zoneChangedAt = new Date();
   }
 
+  // ---------- NEW: compute firstPaymentAt + placementMonth ----------
+  // Find earliest valid payment date every save. (Covers add/edit/delete payments and creates.)
+  const validDates = (this.payments || [])
+    .map((p) =>
+      p?.date instanceof Date ? p.date : p?.date ? new Date(p.date) : null
+    )
+    .filter((d) => d instanceof Date && !isNaN(d));
+  if (validDates.length) {
+    const first = new Date(Math.min(...validDates.map((d) => d.getTime())));
+    // normalize to UTC date (ignore time)
+    const firstUTC = new Date(
+      Date.UTC(first.getUTCFullYear(), first.getUTCMonth(), first.getUTCDate())
+    );
+    this.firstPaymentAt = firstUTC;
+    this.placementMonth = computePlacementMonthFromFirstPayment(firstUTC);
+  } else {
+    // No payments yet
+    this.firstPaymentAt = undefined;
+    this.placementMonth = undefined;
+  }
+
   next();
 });
 
-// indexes
+// existing indexes…
 PrePlacementStudentSchema.index({ status: 1, dueDate: 1, remainingFee: 1 });
 PrePlacementStudentSchema.index({ zone: 1, status: 1 });
 PrePlacementStudentSchema.index({ "interviews.scheduledAt": 1 });
+
+// NEW helpful index for reporting
+PrePlacementStudentSchema.index({ placementMonth: 1 });
 
 export default mongoose.models.PrePlacementStudent ||
   mongoose.model("PrePlacementStudent", PrePlacementStudentSchema);

@@ -200,4 +200,71 @@ router.patch(
     res.json({ ok: true });
   }
 );
+router.get(
+  "/report/daily",
+  requireAuth,
+  requireRole("admin"),
+  async (req, res) => {
+    try {
+      const from = req.query.from ? new Date(req.query.from) : null;
+      const to = req.query.to ? new Date(req.query.to) : null;
+
+      const match = {};
+      if (from || to) {
+        match.createdAt = {};
+        if (from) match.createdAt.$gte = from;
+        if (to) match.createdAt.$lte = to;
+      }
+
+      const pipeline = [
+        { $match: match },
+        {
+          $group: {
+            _id: {
+              day: {
+                $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+              },
+              user: "$createdBy",
+            },
+            countTotal: { $sum: 1 },
+            countWithPhone: {
+              $sum: { $cond: [{ $ifNull: ["$phoneE164", false] }, 1, 0] },
+            },
+            countWithEmail: {
+              $sum: { $cond: [{ $ifNull: ["$email", false] }, 1, 0] },
+            },
+          },
+        },
+        {
+          $lookup: {
+            from: "users",
+            localField: "_id.user",
+            foreignField: "_id",
+            as: "user",
+          },
+        },
+        { $unwind: "$user" },
+        {
+          $project: {
+            date: "$_id.day",
+            userId: "$_id.user",
+            username: "$user.username",
+            name: "$user.name",
+            countTotal: 1,
+            countWithPhone: 1,
+            countWithEmail: 1,
+            _id: 0,
+          },
+        },
+        { $sort: { date: -1, username: 1 } },
+      ];
+
+      const results = await HrContact.aggregate(pipeline);
+      res.json(results);
+    } catch (err) {
+      console.error("Daily report error:", err);
+      res.status(500).json({ error: "Failed to generate report" });
+    }
+  }
+);
 export default router;

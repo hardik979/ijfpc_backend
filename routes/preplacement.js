@@ -1496,5 +1496,49 @@ router.get("/green/interviews", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// routes/preplacementRoutes.js (add somewhere below your other routes)
+router.get("/placements/summary", async (req, res) => {
+  try {
+    const { month, from, to } = req.query;
+    // support ?month=YYYY-MM or from/to filters on placementMonth
+    let range = {};
+    if (month) {
+      const [y, m] = String(month).split("-").map(Number);
+      if (y && m) {
+        const start = new Date(Date.UTC(y, m - 1, 1));
+        const end = new Date(
+          Date.UTC(m === 12 ? y + 1 : y, m === 12 ? 0 : m, 1)
+        );
+        range = { placementMonth: { $gte: start, $lt: end } };
+      }
+    } else if (from || to) {
+      range = {
+        placementMonth: {
+          ...(from ? { $gte: new Date(String(from)) } : {}),
+          ...(to ? { $lt: new Date(String(to)) } : {}),
+        },
+      };
+    }
+
+    const rows = await PrePlacementStudent.aggregate([
+      { $match: { placementMonth: { $type: "date" }, ...range } },
+      {
+        $group: {
+          _id: "$placementMonth",
+          count: { $sum: 1 },
+          students: {
+            $push: { _id: "$_id", name: "$name", courseName: "$courseName" },
+          },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+
+    res.json({ rows });
+  } catch (err) {
+    console.error("placements summary error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 export default router;

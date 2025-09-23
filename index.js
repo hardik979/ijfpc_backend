@@ -23,7 +23,9 @@ const app = express();
 const allowedOrigins = [
   "https://dashboard.itjobsfactory.com",
   "https://research.itjobsfactory.com",
+  "https://placements.itjobsfactory.com",
 ];
+//M
 //Middleware
 app.use(
   cors({
