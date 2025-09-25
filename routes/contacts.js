@@ -141,24 +141,41 @@ router.get(
 
     const or = [];
     if (q) {
-      // text fields
       or.push({ companyName: { $regex: q, $options: "i" } });
       or.push({ hrName: { $regex: q, $options: "i" } });
       or.push({ email: { $regex: q, $options: "i" } });
       or.push({ keySkills: { $elemMatch: { $regex: q, $options: "i" } } });
-
-      // numeric/phone search
       const digits = q.replace(/\D/g, "");
       if (digits) {
-        // last digits in raw phone
         or.push({ phoneRaw: { $regex: `${digits}$` } });
-        // full E.164 if parsable
         const e164 = toE164(q, "IN");
         if (e164) or.push({ phoneE164: e164 });
       }
     }
 
     const match = or.length ? { $or: or } : {};
+
+    // ✅ date filter
+    if (!q && req.query.date) {
+      const d = new Date(req.query.date);
+      if (!isNaN(d)) {
+        const start = new Date(
+          Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0)
+        );
+        const end = new Date(
+          Date.UTC(
+            d.getUTCFullYear(),
+            d.getUTCMonth(),
+            d.getUTCDate(),
+            23,
+            59,
+            59
+          )
+        );
+        match.createdAt = { $gte: start, $lte: end };
+      }
+    }
+
     const [items, total] = await Promise.all([
       HrContact.find(match)
         .select(
@@ -267,4 +284,55 @@ router.get(
     }
   }
 );
+// GET /contacts/report/mine/daily
+// Query: ?from=ISO&to=ISO   (optional; defaults to "today" UTC)
+router.get("/report/mine/daily", requireAuth, async (req, res) => {
+  try {
+    // build [from, to] — default to today's UTC day if not provided
+    let from = req.query.from ? new Date(req.query.from) : null;
+    let to = req.query.to ? new Date(req.query.to) : null;
+
+    if (!from || !to) {
+      const now = new Date();
+      const y = now.getUTCFullYear(),
+        m = now.getUTCMonth(),
+        d = now.getUTCDate();
+      from = new Date(Date.UTC(y, m, d, 0, 0, 0, 0));
+      to = new Date(Date.UTC(y, m, d, 23, 59, 59, 999));
+    }
+
+    const match = {
+      createdBy: req.userId,
+      createdAt: { $gte: from, $lte: to },
+    };
+
+    const [row] = await HrContact.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: null,
+          countTotal: { $sum: 1 },
+          countWithPhone: {
+            $sum: { $cond: [{ $ifNull: ["$phoneE164", false] }, 1, 0] },
+          },
+          countWithEmail: {
+            $sum: { $cond: [{ $ifNull: ["$email", false] }, 1, 0] },
+          },
+        },
+      },
+    ]);
+
+    res.json({
+      from: from.toISOString(),
+      to: to.toISOString(),
+      countTotal: row?.countTotal || 0,
+      countWithPhone: row?.countWithPhone || 0, // "numbers added"
+      countWithEmail: row?.countWithEmail || 0, // "emails added"
+    });
+  } catch (err) {
+    console.error("Self daily report error:", err);
+    res.status(500).json({ error: "Failed to generate report" });
+  }
+});
+
 export default router;
