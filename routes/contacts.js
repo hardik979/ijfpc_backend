@@ -3,6 +3,7 @@ import express from "express";
 import { requireAuth, requireRole } from "../middlewares/auth.js";
 import HrContact from "../models/HrContact.js";
 import { toE164 } from "../utils/phone.js";
+import mongoose from "mongoose"; // ⬅️ add this
 
 const router = express.Router();
 
@@ -156,24 +157,23 @@ router.get(
     const match = or.length ? { $or: or } : {};
 
     // ✅ date filter
+    // in /verify/list, replace the date-filter block with:
     if (!q && req.query.date) {
-      const d = new Date(req.query.date);
-      if (!isNaN(d)) {
-        const start = new Date(
-          Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0)
-        );
-        const end = new Date(
-          Date.UTC(
-            d.getUTCFullYear(),
-            d.getUTCMonth(),
-            d.getUTCDate(),
-            23,
-            59,
-            59
-          )
-        );
-        match.createdAt = { $gte: start, $lte: end };
-      }
+      const tz = String(req.query.tz || "Asia/Kolkata");
+      const dateStr = String(req.query.date); // YYYY-MM-DD
+      // Build match by converting createdAt to a local-day string, then match it.
+      match.$expr = {
+        $eq: [
+          {
+            $dateToString: {
+              format: "%Y-%m-%d",
+              date: "$createdAt",
+              timezone: tz,
+            },
+          },
+          dateStr,
+        ],
+      };
     }
 
     const [items, total] = await Promise.all([
@@ -232,6 +232,7 @@ router.get(
         if (from) match.createdAt.$gte = from;
         if (to) match.createdAt.$lte = to;
       }
+      const tz = String(req.query.tz || "Asia/Kolkata");
 
       const pipeline = [
         { $match: match },
@@ -239,7 +240,11 @@ router.get(
           $group: {
             _id: {
               day: {
-                $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+                $dateToString: {
+                  format: "%Y-%m-%d",
+                  date: "$createdAt",
+                  timezone: tz,
+                },
               },
               user: "$createdBy",
             },
@@ -288,26 +293,27 @@ router.get(
 // Query: ?from=ISO&to=ISO   (optional; defaults to "today" UTC)
 router.get("/report/mine/daily", requireAuth, async (req, res) => {
   try {
-    // build [from, to] — default to today's UTC day if not provided
-    let from = req.query.from ? new Date(req.query.from) : null;
-    let to = req.query.to ? new Date(req.query.to) : null;
+    const date = String(
+      req.query.date || new Date().toISOString().slice(0, 10)
+    ); // YYYY-MM-DD
+    const tz = String(req.query.tz || "Asia/Kolkata");
 
-    if (!from || !to) {
-      const now = new Date();
-      const y = now.getUTCFullYear(),
-        m = now.getUTCMonth(),
-        d = now.getUTCDate();
-      from = new Date(Date.UTC(y, m, d, 0, 0, 0, 0));
-      to = new Date(Date.UTC(y, m, d, 23, 59, 59, 999));
-    }
+    const userId = new mongoose.Types.ObjectId(req.userId); // ⬅️ cast!
 
-    const match = {
-      createdBy: req.userId,
-      createdAt: { $gte: from, $lte: to },
-    };
-
-    const [row] = await HrContact.aggregate([
-      { $match: match },
+    const [r] = await HrContact.aggregate([
+      { $match: { createdBy: userId } }, // ⬅️ use ObjectId here
+      {
+        $addFields: {
+          dayLocal: {
+            $dateToString: {
+              format: "%Y-%m-%d",
+              date: "$createdAt",
+              timezone: tz,
+            },
+          },
+        },
+      },
+      { $match: { dayLocal: date } },
       {
         $group: {
           _id: null,
@@ -323,11 +329,11 @@ router.get("/report/mine/daily", requireAuth, async (req, res) => {
     ]);
 
     res.json({
-      from: from.toISOString(),
-      to: to.toISOString(),
-      countTotal: row?.countTotal || 0,
-      countWithPhone: row?.countWithPhone || 0, // "numbers added"
-      countWithEmail: row?.countWithEmail || 0, // "emails added"
+      date,
+      tz,
+      countTotal: r?.countTotal || 0,
+      countWithPhone: r?.countWithPhone || 0,
+      countWithEmail: r?.countWithEmail || 0,
     });
   } catch (err) {
     console.error("Self daily report error:", err);
