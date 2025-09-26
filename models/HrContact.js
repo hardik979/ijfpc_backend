@@ -1,4 +1,3 @@
-// src/models/HrContact.js
 import mongoose from "mongoose";
 
 const HrContactSchema = new mongoose.Schema(
@@ -19,12 +18,17 @@ const HrContactSchema = new mongoose.Schema(
     experienceText: { type: String, trim: true },
     profileUrl: { type: String, trim: true },
 
-    // ⬇️ NEW: verifier status
+    // verifier status
     status: {
       type: String,
       enum: ["red", "yellow", "green"],
       default: undefined,
     },
+
+    // ⬇️ NEW: verifier remark + simple audit
+    verifierRemark: { type: String, trim: true, maxlength: 500 },
+    statusUpdatedAt: { type: Date },
+    statusUpdatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
 
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
@@ -40,6 +44,8 @@ HrContactSchema.index(
   { phoneE164: 1 },
   { unique: true, partialFilterExpression: { phoneE164: { $type: "string" } } }
 );
+HrContactSchema.index({ createdBy: 1, createdAt: -1 });
+HrContactSchema.index({ createdAt: -1 });
 
 export default mongoose.models.HrContact ||
   mongoose.model("HrContact", HrContactSchema, "ijf_rd_hr_contacts");

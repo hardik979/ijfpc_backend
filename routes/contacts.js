@@ -179,7 +179,7 @@ router.get(
     const [items, total] = await Promise.all([
       HrContact.find(match)
         .select(
-          "_id date companyName hrName email phoneRaw phoneE164 status createdAt"
+          "_id date companyName hrName email phoneRaw phoneE164 status verifierRemark statusUpdatedAt statusUpdatedBy createdAt"
         )
         .sort({ createdAt: -1 })
         .skip((page - 1) * limit)
@@ -203,20 +203,41 @@ router.patch(
   requireRole("verifier", "admin"),
   async (req, res) => {
     const raw = req.body?.status;
+    const remark =
+      typeof req.body?.remark === "string" ? req.body.remark.trim() : undefined;
+
     const normalized =
       raw === null || raw === undefined ? null : String(raw).toLowerCase();
     const allowed = [null, "red", "yellow", "green"];
     if (!allowed.includes(normalized)) {
       return res.status(400).json({ error: "Invalid status" });
     }
+    if (remark && remark.length > 500) {
+      return res.status(400).json({ error: "Remark too long (max 500 chars)" });
+    }
 
-    await HrContact.findByIdAndUpdate(req.params.id, {
-      status: normalized || undefined, // store null/undefined the same way
-    });
+    // Build update doc:
+    const update = {
+      status: normalized || undefined, // store null as undefined
+      statusUpdatedAt: new Date(),
+      statusUpdatedBy: req.userId,
+    };
+
+    // Set or unset verifierRemark independently of status
+    if (remark === undefined) {
+      // no change to remark
+    } else if (remark === "") {
+      update.$unset = { ...(update.$unset || {}), verifierRemark: "" };
+    } else {
+      update.verifierRemark = remark;
+    }
+
+    await HrContact.findByIdAndUpdate(req.params.id, update);
 
     res.json({ ok: true });
   }
 );
+
 router.get(
   "/report/daily",
   requireAuth,
