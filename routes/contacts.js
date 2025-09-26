@@ -340,5 +340,92 @@ router.get("/report/mine/daily", requireAuth, async (req, res) => {
     res.status(500).json({ error: "Failed to generate report" });
   }
 });
+// ⬇️ put this near your other report routes in src/routes/contacts.js
+
+/**
+ * GET /contacts/report/status-summary?from=YYYY-MM-DD&to=YYYY-MM-DD&tz=Asia/Kolkata
+ * Summarize statuses within a local-day range based on createdAt.
+ */
+router.get(
+  "/report/status-summary",
+  requireAuth,
+  requireRole("verifier", "admin"),
+  async (req, res) => {
+    try {
+      const tz = String(req.query.tz || "Asia/Kolkata");
+      let from = req.query.from ? String(req.query.from) : undefined;
+      let to = req.query.to ? String(req.query.to) : undefined;
+
+      // If user inverted the dates, swap
+      if (from && to && from > to) [from, to] = [to, from];
+
+      // Build pipeline: compute local day string, then range match on that string
+      const pipeline = [
+        {
+          $addFields: {
+            dayLocal: {
+              $dateToString: {
+                format: "%Y-%m-%d",
+                date: "$createdAt",
+                timezone: tz,
+              },
+            },
+          },
+        },
+      ];
+
+      const match = {};
+      if (from && to) {
+        match.dayLocal = { $gte: from, $lte: to };
+      } else if (from) {
+        match.dayLocal = { $gte: from };
+      } else if (to) {
+        match.dayLocal = { $lte: to };
+      }
+      if (Object.keys(match).length) pipeline.push({ $match: match });
+
+      pipeline.push({
+        $group: {
+          _id: null,
+          total: { $sum: 1 },
+          red: {
+            $sum: { $cond: [{ $eq: ["$status", "red"] }, 1, 0] },
+          },
+          yellow: {
+            $sum: { $cond: [{ $eq: ["$status", "yellow"] }, 1, 0] },
+          },
+          green: {
+            $sum: { $cond: [{ $eq: ["$status", "green"] }, 1, 0] },
+          },
+          unset: {
+            // null, missing, or empty -> count as unset
+            $sum: {
+              $cond: [
+                {
+                  $or: [{ $eq: ["$status", null] }, { $not: ["$status"] }],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+        },
+      });
+
+      const [r] = await HrContact.aggregate(pipeline);
+
+      res.json({
+        red: r?.red || 0,
+        yellow: r?.yellow || 0,
+        green: r?.green || 0,
+        unset: r?.unset || 0,
+        total: r?.total || 0,
+      });
+    } catch (err) {
+      console.error("Status summary error:", err);
+      res.status(500).json({ error: "Failed to get status summary" });
+    }
+  }
+);
 
 export default router;
