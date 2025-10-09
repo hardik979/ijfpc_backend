@@ -18,7 +18,7 @@
     "cloudinary": "^2.7.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
-    "dayjs": "^1.11.13",
+    "dayjs": "^1.11.18",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "express-rate-limit": "^8.1.0",
@@ -29,6 +29,10 @@
     "node-fetch": "^3.3.2",
     "nodemailer": "^7.0.6",
     "nodemon": "^3.1.10",
+    "puppeteer": "^24.23.0",
+    "razorpay": "^2.9.6",
+    "socket.io": "^4.8.1",
+    "xlsx": "^0.18.5",
     "zod": "^4.0.17"
   }
 }

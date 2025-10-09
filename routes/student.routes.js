@@ -1,12 +1,15 @@
 import express from "express";
-import { Student } from "../models/student.model.js";
-import cloudinary from "../config/cloudinary.js";
+import { Student, MODES } from "../models/student.model.js";
+import PrePlacementStudent from "../models/PrePlacementStudent.js";
+import { makeNameKey } from "../lib/nameKey.js";
+
 const router = express.Router();
 
 const isEmail = (s = "") => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s).trim());
 const isYear = (n) => Number.isInteger(n) && n >= 1990 && n <= 2100;
 
-function validateAdmission(body = {}) {
+/** Validate ONLY personal info (no payment / no Aadhaar) */
+function validatePersonal(body = {}) {
   const errors = [];
   const reqStr = (v, name) => {
     if (!v || typeof v !== "string" || !v.trim())
@@ -25,45 +28,35 @@ function validateAdmission(body = {}) {
     errors.push("passoutYear must be between 1990 and 2100");
 
   if (!body.mode || !MODES.includes(body.mode)) errors.push("mode is invalid");
-
-  if (!body.aadhaar?.publicId) errors.push("aadhaar upload metadata missing");
-  if (!body.aadhaarLast4 || !/^\d{4}$/.test(String(body.aadhaarLast4)))
-    errors.push("aadhaarLast4 must be exactly 4 digits");
-
-  if (!body.prePlacement?.plan || !PRE_PLANS.includes(body.prePlacement.plan))
-    errors.push("prePlacement.plan is invalid");
-
   if (body.email && !isEmail(body.email)) errors.push("email is invalid");
 
-  // Allow 10–15 digits (you can tighten to India rules if you like)
+  // Allow 10–15 digits (digits-only check)
   if (
     body.mobile &&
     !/^\d{10,15}$/.test(String(body.mobile).replace(/\D/g, ""))
-  )
+  ) {
     errors.push("mobile is invalid");
+  }
 
   return errors;
 }
 
-/* ---------- create student ---------- */
-router.post("/admission", async (req, res) => {
+/* ---------- STEP 1: create student with personal info only ---------- */
+/** POST /students/admission/personal */
+router.post("/admission/personal", async (req, res) => {
   try {
     const b = req.body || {};
-
-    // 1) validate early
-    const errors = validateAdmission(b);
+    const errors = validatePersonal(b);
     if (errors.length) {
-      // no big stack traces — just a clean 400
       return res
         .status(400)
         .json({ error: "Validation failed", details: errors });
     }
 
-    // 2) normalize
     const email = String(b.email).trim().toLowerCase();
     const mobile = String(b.mobile).trim();
 
-    // 3) pre-check duplicates to avoid E11000 logs
+    // pre-check duplicates to avoid E11000 logs
     const [emailDup, mobileDup] = await Promise.all([
       Student.exists({ email }),
       Student.exists({ mobile }),
@@ -73,7 +66,7 @@ router.post("/admission", async (req, res) => {
     if (mobileDup)
       return res.status(409).json({ error: "mobile already exists" });
 
-    // 4) save
+    // Save Student (ONLY personal fields)
     const student = new Student({
       fullName: b.fullName,
       fathersName: b.fathersName,
@@ -83,67 +76,57 @@ router.post("/admission", async (req, res) => {
       degree: b.degree,
       passoutYear: Number(b.passoutYear),
       mode: b.mode,
-      aadhaar: {
-        publicId: b.aadhaar.publicId,
-        url: b.aadhaar.url,
-        format: b.aadhaar.format,
-        bytes: b.aadhaar.bytes,
-        uploadedAt: b.aadhaar.uploadedAt
-          ? new Date(b.aadhaar.uploadedAt)
-          : new Date(),
-        resourceType: b.aadhaar.resourceType || "image",
-        pages: b.aadhaar.pages,
-      },
-      aadhaarLast4: String(b.aadhaarLast4).slice(-4),
-      prePlacement: b.prePlacement,
     });
 
     await student.save();
-    return res
-      .status(201)
-      .json({ message: "Student registered successfully", student });
+
+    // Ensure a minimal PrePlacementStudent exists
+    const nameKey = makeNameKey(student.fullName, student.mobile);
+    await PrePlacementStudent.updateOne(
+      { nameKey },
+      {
+        $setOnInsert: {
+          name: student.fullName,
+          nameKey,
+          totalFee: 0,
+          status: "ACTIVE",
+          zone: "BLUE",
+          payments: [],
+          refunds: [],
+          source: { provider: "Admission", lastSyncedAt: new Date() },
+        },
+      },
+      { upsert: true }
+    );
+
+    // Optional: notify managers a new admission request came in
+    req.io
+      ?.of("/admissions")
+      ?.to("managers")
+      ?.emit("admission:new-request", {
+        studentId: String(student._id),
+        name: student.fullName,
+        mobile: student.mobile,
+        createdAt: student.createdAt,
+      });
+
+    return res.status(201).json({
+      message: "Personal info submitted",
+      studentId: student._id,
+    });
   } catch (err) {
-    // 5) quiet, user-friendly errors
     if (err?.code === 11000) {
       const field = Object.keys(err.keyPattern || {})[0] || "unique field";
-      console.warn(`Duplicate ${field} attempted`);
       return res.status(409).json({ error: `${field} already exists` });
     }
-    console.warn("Admission create failed:", err?.message);
     return res
       .status(400)
       .json({ error: "Unable to create student", details: err?.message });
   }
 });
 
-/* ---------- existing GET (unchanged) ---------- */
-router.get("/:id/aadhaar", async (req, res) => {
-  try {
-    const s = await Student.findById(req.params.id).select("aadhaar");
-    if (!s?.aadhaar?.publicId)
-      return res.status(404).json({ error: "Not found" });
-
-    const isPdf = s.aadhaar.format?.toLowerCase() === "pdf";
-    const resourceType = isPdf ? "raw" : s.aadhaar.resourceType || "image";
-    const format = isPdf ? "pdf" : s.aadhaar.format || "jpg";
-
-    const url = cloudinary.utils.private_download_url(
-      s.aadhaar.publicId,
-      format,
-      {
-        resource_type: resourceType,
-        expires_at: Math.floor(Date.now() / 1000) + 300, // 5 minutes
-      }
-    );
-
-    res.json({ url, publicId: s.aadhaar.publicId });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-// 👉 Get all students
-router.get("/", async (req, res) => {
+/* ---------- list all students ---------- */
+router.get("/", async (_req, res) => {
   try {
     const students = await Student.find().lean();
     res.json(students);
@@ -152,7 +135,7 @@ router.get("/", async (req, res) => {
   }
 });
 
-// 👉 Get single student by ID
+/* ---------- get single student ---------- */
 router.get("/:id", async (req, res) => {
   try {
     const student = await Student.findById(req.params.id).lean();
@@ -162,5 +145,36 @@ router.get("/:id", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch student" });
   }
 });
+router.post("/:id/accept-terms", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const s = await Student.findById(id);
+    if (!s) return res.status(404).json({ error: "Student not found" });
 
+    // OPTIONAL: enforce payment success before allowing terms
+    // If you want to allow testing without payment, comment this out.
+    if (s.admissionPayment?.status !== "PAID") {
+      console.warn(
+        `accept-terms called but payment status is ${
+          s.admissionPayment?.status || "NONE"
+        } for ${id}`
+      );
+      // return res.status(400).json({ error: "Payment not completed" });
+    }
+
+    s.termsAcceptedAt = new Date();
+
+    // Optional lightweight stage tracking (only if you want it)
+    // s.admissionStage = "COMPLETED";
+
+    await s.save();
+
+    return res.json({ ok: true, message: "Terms accepted" });
+  } catch (err) {
+    console.error("accept-terms error:", err);
+    return res
+      .status(500)
+      .json({ error: err?.message || "Failed to accept terms" });
+  }
+});
 export default router;

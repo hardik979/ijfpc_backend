@@ -1,24 +1,33 @@
+// models/student.model.js
 import mongoose from "mongoose";
 
 const MODES = ["ONLINE", "OFFLINE", "SELF_PACED"];
-const PRE_PLANS = ["ONE_SHOT_25K", "INSTALLMENT_30K"];
-
-const AadhaarSchema = new mongoose.Schema(
+// models/student.model.js  (add inside StudentSchema definition)
+const AdmissionPaymentSchema = new mongoose.Schema(
   {
-    publicId: { type: String, index: true },
-    url: String, // only for convenience; real access uses signed links
-    format: String, // "pdf","jpg","png",...
-    bytes: Number,
-    uploadedAt: Date,
-    resourceType: String, // "image" | "raw" | "video"
-    pages: Number, // for PDFs (if Cloudinary returns it)
+    plan: {
+      type: String,
+      enum: ["ADMISSION_1K", "ONE_SHOT_25K", "EMI_SNAPMINT_30K"], // ← add ADMISSION_1K
+      index: true,
+    },
+    status: {
+      type: String,
+      enum: ["NONE", "CREATED", "PAID", "FAILED", "REFUNDED"],
+      default: "NONE",
+      index: true,
+    },
+    amount: Number, // paise
+    currency: { type: String, default: "INR" },
+    orderId: String,
+    paymentId: String,
+    notes: { type: Object, default: {} },
+    paidAt: Date,
   },
   { _id: false }
 );
-
 const StudentSchema = new mongoose.Schema(
   {
-    // filled by student
+    // filled by student (step-1 only)
     fullName: { type: String, required: true, trim: true },
     fathersName: { type: String, required: true, trim: true },
     mobile: { type: String, required: true, unique: true, trim: true },
@@ -34,32 +43,30 @@ const StudentSchema = new mongoose.Schema(
     passoutYear: { type: Number, required: true, min: 1990, max: 2100 },
     mode: { type: String, enum: MODES, required: true },
 
-    // Aadhaar meta (NOT the full number)
-    aadhaar: AadhaarSchema,
-    aadhaarLast4: { type: String, minlength: 4, maxlength: 4, trim: true },
-
-    // filled by admin/counselor
+    // optional admin/counselor fields (kept for ops)
     receiptNo: { type: String, trim: true, index: true },
     enrollmentDate: Date,
     batchStartDate: Date,
     counselorName: { type: String, trim: true },
-
-    prePlacement: {
-      plan: { type: String, enum: PRE_PLANS },
-    },
+    admissionPayment: { type: AdmissionPaymentSchema, default: () => ({}) },
   },
   { timestamps: true }
 );
 
 // normalization
 StudentSchema.pre("save", function (next) {
-  const compact = (s) => s?.trim().replace(/\s+/g, " ");
+  const compact = (s) =>
+    typeof s === "string" ? s.trim().replace(/\s+/g, " ") : s;
   if (this.fullName) this.fullName = compact(this.fullName);
   if (this.fathersName) this.fathersName = compact(this.fathersName);
   if (this.counselorName) this.counselorName = compact(this.counselorName);
   next();
 });
 
+// helpful indexes for queues & lookups (trimmed)
+StudentSchema.index({ createdAt: -1 });
+
 const Student =
   mongoose.models.Student || mongoose.model("Student", StudentSchema);
-export { Student, MODES, PRE_PLANS };
+
+export { Student, MODES };
