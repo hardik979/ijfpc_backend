@@ -23,7 +23,7 @@ import dashboardRoutes from "./routes/dashboardRoutes.js";
 import adminUserRoutes from "./routes/adminUsers.js";
 import authRoutes from "./routes/auth.js";
 import contactsRoutes from "./routes/contacts.js";
-
+import leadRoutes from "./routes/lead.routes.js";
 import paymentRoutes from "./routes/payments.routes.js";
 import { Student } from "./models/student.model.js"; // for socket token check
 
@@ -34,7 +34,6 @@ const allowedOrigins = [
   "https://www.itjobsfactory.com",
   "https://research.itjobsfactory.com",
   "https://placements.itjobsfactory.com",
-  // add your dev origin(s) if needed:
 ];
 
 app.use(
@@ -94,7 +93,7 @@ app.use("/api/offers", PostPlacementRoutes);
 app.use("/api/post-placement", postPlacementDataRoutes);
 app.use("/api/hr", hrRoutes);
 app.use("/api/cloudinary", cloudinaryRoutes);
-
+app.use("/api/leads", leadRoutes);
 app.use("/api/preplacement", prePlacementRoutes);
 app.use("/api/demo-users", demoUsersRouter);
 app.use("/api/dashboard", dashboardRoutes);
