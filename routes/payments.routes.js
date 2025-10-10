@@ -78,7 +78,7 @@ router.post("/create-order", async (req, res) => {
     }
 
     // Fixed ₹1,000 admission fee (paise)
-    const amount = 100;
+    const amount = 100000;
 
     // Short receipt
     const ts = Date.now().toString().slice(-8);
