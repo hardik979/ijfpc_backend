@@ -207,7 +207,7 @@ router.post("/verify", async (req, res) => {
 
     // idempotent upsert that matches your PrePlacementStudent schema defaults
     await PrePlacementStudent.updateOne(
-      { nameKey, "payments.receiptNos": { $ne: payment.id } },
+      { nameKey },
       {
         $setOnInsert: {
           name: s.fullName,
@@ -216,7 +216,7 @@ router.post("/verify", async (req, res) => {
           terms: undefined,
           totalFee: 0,
           dueDate: undefined,
-          payments: [],
+          payments: [], // initialize
           refunds: [],
           totalRefunded: 0,
           netCollected: 0,
@@ -227,32 +227,26 @@ router.post("/verify", async (req, res) => {
           source: { provider: "Admission", lastSyncedAt: new Date() },
           reminders: {},
         },
+      },
+      { upsert: true }
+    );
+
+    // 2️⃣ Push payment separately (only if it’s not already recorded)
+    await PrePlacementStudent.updateOne(
+      { nameKey, "payments.receiptNos": { $ne: payment.id } },
+      {
         $push: {
           payments: {
-            amount: rupees,
+            amount: Math.round((payment.amount || 0) / 100),
             date: new Date(payment.created_at * 1000),
-            mode: (function modeFromPayment(p) {
-              const m = p?.method;
-              if (m === "upi") return "RZP:UPI";
-              if (m === "card") return "RZP:CARD";
-              if (m === "netbanking") return "RZP:NETBANKING";
-              if (m === "wallet") return `RZP:WALLET:${p?.wallet || "GEN"}`;
-              if (m === "emi") return "RZP:EMI";
-              if (m === "cardless_emi")
-                return `RZP:CARDLESS_EMI:${(
-                  p?.cardless_emi?.provider || "PROVIDER"
-                ).toUpperCase()}`;
-              return `RZP:${(m || "UNKNOWN").toUpperCase()}`;
-            })(payment),
+            mode: modeFromPayment(payment),
             receiptNos: [payment.id, order.receipt].filter(Boolean),
             note: "ADMISSION_1K",
             raw: payment,
           },
         },
-      },
-      { upsert: true }
+      }
     );
-
     // 6) (Optional) build receipt + email (keep your existing code if you want)
     // 6) Build receipt → PDF → email to student + bcc management
     try {
