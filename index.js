@@ -16,7 +16,7 @@ import PostPlacementRoutes from "./routes/postPlacement.js";
 import postPlacementDataRoutes from "./routes/postPlacement.routes.js";
 import hrRoutes from "./routes/hr.js";
 import cloudinaryRoutes from "./routes/cloudinary.routes.js";
-
+import hrStatsRoutes from "./routes/hrContacts.stats.js";
 import prePlacementRoutes from "./routes/preplacement.js";
 import demoUsersRouter from "./routes/demoUsers.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
@@ -25,8 +25,11 @@ import authRoutes from "./routes/auth.js";
 import contactsRoutes from "./routes/contacts.js";
 import leadRoutes from "./routes/lead.routes.js";
 import paymentRoutes from "./routes/payments.routes.js";
+import timesheetAuthRouter from "./routes/timesheet_auth.js";
+import workdayRoutes from "./routes/timesheet_workday.js";
+import reportRoutes from "./routes/timesheet_reports.js";
 import { Student } from "./models/student.model.js"; // for socket token check
-
+import { clerkMiddleware } from "@clerk/express";
 const app = express();
 
 const allowedOrigins = [
@@ -34,6 +37,7 @@ const allowedOrigins = [
   "https://www.itjobsfactory.com",
   "https://research.itjobsfactory.com",
   "https://placements.itjobsfactory.com",
+  "https://timesheet.itjobsfactory.com",
 ];
 
 app.use(
@@ -100,9 +104,12 @@ app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/admin", adminUserRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/contacts", contactsRoutes);
-
+app.use("/api/hr-contacts", hrStatsRoutes);
 app.use("/api/payments", paymentRoutes);
-
+app.use(clerkMiddleware());
+app.use("/api", timesheetAuthRouter);
+app.use("/api", workdayRoutes);
+app.use("/api", reportRoutes);
 /* -------------------- Init DB + start -------------------- */
 connectDB();
 
