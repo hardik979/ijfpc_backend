@@ -4,7 +4,6 @@ import TimesheetWorkday, {
   OFFICE_TZ,
   OFFICE_START_MINUTES,
   OFFICE_END_MINUTES,
-  MAX_BREAK_MINUTES,
 } from "../models/timesheet_workday.js";
 import { toDayKey, localMinutes } from "./_time.js";
 
@@ -143,35 +142,15 @@ router.post("/workday/tasks", requireAuth(), async (req, res) => {
   }
 });
 
-/** ========= Set Break (single 30-min anywhere or split) =========
- * POST /api/workday/breaks
- * body: { startISO, endISO }
- * Multiple breaks allowed but total <= 30 minutes
+/** ========= Break: START =========
+ * POST /api/workday/breaks/start
+ * body: { atISO? } default: now
  */
-router.post("/workday/breaks", requireAuth(), async (req, res) => {
+router.post("/workday/breaks/start", requireAuth(), async (req, res) => {
   try {
     const { userId } = req.auth;
     const dayKey = toDayKey();
-    const { startISO, endISO } = req.body || {};
-    if (!startISO || !endISO)
-      return res.status(400).json({ error: "Missing break startISO/endISO" });
-
-    const start = new Date(startISO);
-    const end = new Date(endISO);
-    if (!(start < end))
-      return res.status(400).json({ error: "Break start must be before end" });
-
-    // bounds check
-    const sMin = localMinutes(start),
-      eMin = localMinutes(end);
-    if (sMin < OFFICE_START_MINUTES || eMin > OFFICE_END_MINUTES) {
-      return res
-        .status(400)
-        .json({ error: "Break must be within office hours" });
-    }
-
-    const minutes = Math.round((end - start) / 60000);
-    if (minutes < 1) return res.status(400).json({ error: "Break too short" });
+    const at = req.body?.atISO ? new Date(req.body.atISO) : new Date();
 
     const doc = await TimesheetWorkday.findOne({ clerkId: userId, dayKey });
     if (!doc)
@@ -179,21 +158,81 @@ router.post("/workday/breaks", requireAuth(), async (req, res) => {
         .status(404)
         .json({ error: "Workday not found. Clock-in first." });
 
-    const newTotal = (doc.breakTotalMin || 0) + minutes;
-    if (newTotal > MAX_BREAK_MINUTES) {
-      return res
-        .status(400)
-        .json({ error: `Total break exceeds ${MAX_BREAK_MINUTES} minutes` });
+    if (doc.breakActiveStart) {
+      return res.status(400).json({ error: "A break is already in progress" });
     }
 
+    const m = localMinutes(at);
+    if (m < OFFICE_START_MINUTES || m > OFFICE_END_MINUTES) {
+      return res
+        .status(400)
+        .json({ error: "Break must be within office hours" });
+    }
+
+    doc.breakActiveStart = at;
+    await doc.save();
+    return res.json({ ok: true, workday: doc });
+  } catch (err) {
+    console.error("break start error:", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+
+/** ========= Break: END =========
+ * POST /api/workday/breaks/end
+ * body: { atISO? } default: now
+ * Computes minutes, appends to breaks[], clears breakActiveStart, updates totals
+ */
+router.post("/workday/breaks/end", requireAuth(), async (req, res) => {
+  try {
+    const { userId } = req.auth;
+    const dayKey = toDayKey();
+    const at = req.body?.atISO ? new Date(req.body.atISO) : new Date();
+
+    const doc = await TimesheetWorkday.findOne({ clerkId: userId, dayKey });
+    if (!doc)
+      return res
+        .status(404)
+        .json({ error: "Workday not found. Clock-in first." });
+
+    if (!doc.breakActiveStart) {
+      return res.status(400).json({ error: "No active break to end" });
+    }
+
+    const start = new Date(doc.breakActiveStart);
+    const end = at;
+
+    // office window bounds
+    const sMin = localMinutes(start);
+    const eMin = localMinutes(end);
+    if (sMin < OFFICE_START_MINUTES || eMin > OFFICE_END_MINUTES) {
+      return res
+        .status(400)
+        .json({ error: "Break must be within office hours" });
+    }
+    if (!(start < end)) {
+      return res.status(400).json({ error: "Break end must be after start" });
+    }
+
+    const minutes = Math.max(1, Math.round((end - start) / 60000));
+
+    // record the break segment
     doc.breaks.push({ start, end, minutes });
-    doc.breakTotalMin = newTotal;
-    doc.totalPaidMinutes = Math.max(0, (doc.totalTaskMinutes || 0) - newTotal);
+
+    // update totals
+    doc.breakTotalMin = (doc.breakTotalMin || 0) + minutes;
+    doc.totalPaidMinutes = Math.max(
+      0,
+      (doc.totalTaskMinutes || 0) - doc.breakTotalMin
+    );
+
+    // clear the active flag
+    doc.breakActiveStart = null;
 
     await doc.save();
     return res.json({ ok: true, workday: doc });
   } catch (err) {
-    console.error("break error:", err);
+    console.error("break end error:", err);
     return res.status(500).json({ error: "Internal error" });
   }
 });
@@ -211,16 +250,30 @@ router.post("/workday/clock-out", requireAuth(), async (req, res) => {
     const doc = await TimesheetWorkday.findOne({ clerkId: userId, dayKey });
     if (!doc) return res.status(404).json({ error: "Workday not found" });
 
-    // do not allow after office end
+    // clamp to 19:00 local if needed
+    let endAt = at;
     const m = localMinutes(at);
     if (m > OFFICE_END_MINUTES) {
-      // clamp to 19:00 local
-      const d = new Date(at);
       const add = OFFICE_END_MINUTES - m;
-      doc.clockOut = new Date(d.getTime() + add * 60000);
-    } else {
-      doc.clockOut = at;
+      endAt = new Date(at.getTime() + add * 60000);
     }
+
+    // 👇 auto-finish any active break at clock-out time
+    if (doc.breakActiveStart) {
+      const start = new Date(doc.breakActiveStart);
+      if (start < endAt) {
+        const minutes = Math.max(1, Math.round((endAt - start) / 60000));
+        doc.breaks.push({ start, end: endAt, minutes });
+        doc.breakTotalMin = (doc.breakTotalMin || 0) + minutes;
+      }
+      doc.breakActiveStart = null;
+    }
+
+    doc.clockOut = endAt;
+    doc.totalPaidMinutes = Math.max(
+      0,
+      (doc.totalTaskMinutes || 0) - (doc.breakTotalMin || 0)
+    );
 
     await doc.save();
     return res.json({ ok: true, workday: doc });
