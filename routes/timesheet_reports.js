@@ -1,7 +1,6 @@
 import express from "express";
 import TimesheetWorkday from "../models/timesheet_workday.js";
 import { toDayKey } from "./_time.js";
-import { requireAuth } from "@clerk/express";
 
 const router = express.Router();
 
@@ -9,7 +8,7 @@ const router = express.Router();
  * GET /api/reports/eod?day=YYYY-MM-DD (optional; defaults today)
  * Returns each staff member's tasks summary for the day.
  */
-router.get("/reports/eod", requireAuth(), async (req, res) => {
+router.get("/reports/eod", async (req, res) => {
   try {
     const dayKey = req.query.day || toDayKey();
 

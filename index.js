@@ -106,10 +106,11 @@ app.use("/api/auth", authRoutes);
 app.use("/api/contacts", contactsRoutes);
 app.use("/api/hr-contacts", hrStatsRoutes);
 app.use("/api/payments", paymentRoutes);
+app.use("/api", reportRoutes);
 app.use(clerkMiddleware());
 app.use("/api", timesheetAuthRouter);
 app.use("/api", workdayRoutes);
-app.use("/api", reportRoutes);
+
 /* -------------------- Init DB + start -------------------- */
 connectDB();
 
