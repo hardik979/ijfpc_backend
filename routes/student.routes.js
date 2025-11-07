@@ -79,6 +79,30 @@ router.post("/admission/personal", async (req, res) => {
       .json({ error: "Unable to process", details: err?.message });
   }
 });
+router.get("/student-data", async (req, res) => {
+  try {
+    // get all students, newest first
+    const students = await Student.find({}).sort({ createdAt: -1 }).lean();
+
+    // remove admissionPayment.plan from each doc
+    const sanitized = students.map((s) => {
+      const admissionPayment = s.admissionPayment || {};
+      const { plan, ...restPayment } = admissionPayment;
+      return {
+        ...s,
+        admissionPayment: restPayment,
+      };
+    });
+
+    res.json({
+      count: sanitized.length,
+      students: sanitized,
+    });
+  } catch (err) {
+    console.error("Error fetching students:", err);
+    res.status(500).json({ message: "Failed to fetch students" });
+  }
+});
 /* ---------- list all students ---------- */
 router.get("/", async (_req, res) => {
   try {
