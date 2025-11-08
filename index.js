@@ -27,6 +27,7 @@ import leadRoutes from "./routes/lead.routes.js";
 import paymentRoutes from "./routes/payments.routes.js";
 import timesheetAuthRouter from "./routes/timesheet_auth.js";
 import workdayRoutes from "./routes/timesheet_workday.js";
+import preplacementPaymentsRoutes from "./routes/preplacement-payments.routes.js";
 import reportRoutes from "./routes/timesheet_reports.js";
 import { Student } from "./models/student.model.js"; // for socket token check
 import { clerkMiddleware } from "@clerk/express";
@@ -107,6 +108,7 @@ app.use("/api/contacts", contactsRoutes);
 app.use("/api/hr-contacts", hrStatsRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api", reportRoutes);
+app.use("/api/preplacement-payments", preplacementPaymentsRoutes);
 app.use(clerkMiddleware());
 app.use("/api", timesheetAuthRouter);
 app.use("/api", workdayRoutes);
