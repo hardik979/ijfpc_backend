@@ -12,7 +12,7 @@ const razorpay = new Razorpay({
 // 1) create order (fixed 28,320)
 router.post("/create-order", async (req, res) => {
   try {
-    const amount = 2832000; // 28,320 * 100
+    const amount = 432000; // 28,320 * 100
     const receipt = `pp_${Date.now().toString().slice(-8)}`;
 
     const order = await razorpay.orders.create({
