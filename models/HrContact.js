@@ -17,7 +17,12 @@ const HrContactSchema = new mongoose.Schema(
     experienceYears: { type: Number },
     experienceText: { type: String, trim: true },
     profileUrl: { type: String, trim: true },
-
+    qualityBand: {
+      type: String,
+      enum: ["cold", "warm", "hot", "super_hot"],
+      required: true,
+      index: true,
+    },
     // verifier status
     status: {
       type: String,
